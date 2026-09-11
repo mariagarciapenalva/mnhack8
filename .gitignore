@@ -1,0 +1,71 @@
+# CUDA FILES
+*.i
+*.ii
+*.gpu
+*.ptx
+*.cubin
+*.fatbin
+
+# C FILES
+*.d
+*.slo
+*.lo
+*.o
+*.obj
+*.gch
+*.pch
+*.ilk
+*.pdb
+*.so
+*.so.*
+*.dylib
+*.dll
+*.a
+*.lib
+*.la
+*.lai
+*.exe
+*.out
+*.app
+build/
+Build/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+
+# PYTHON FILES
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# LaTeX files
+*.aux
+*.log
+*.toc
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+*.bcf
+*.run.xml
+*.nav
+*.snm
+*.vrb
+
+# ===== Project-specific data policy =====
+# Field-generator binary output (regenerable from seed — see docs/appendices/materials.tex)
+*.bin
+# Plots regenerable from CSV and real measurement data (tracked)
+results/**/*.png
+!results/verify/verify.csv
