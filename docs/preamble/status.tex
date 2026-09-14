@@ -1,0 +1,13 @@
+% status / progress bar
+\section*{Current Status}
+\addcontentsline{toc}{section}{Current Status}
+
+\begin{tcolorbox}[title=Status as of \today, colback=green!5, colframe=green!40!black]
+\textbf{Active layer:} Layer 0 (\autoref{ch:layer0}), verification mode against the exact eigenmode solution. Code edits to \texttt{heat\_solver.cu} are fully specified; awaiting the seven verification-run CSV rows (three-point spatial sweep, four-point temporal sweep) before Layer 1 opens.
+
+\textbf{Not yet started:} Layers 1--10 (\autoref{ch:layer1}--\autoref{ch:layer10}). Each of those chapters is a scoped placeholder -- the plan was agreed in advance, but no code or results exist for them yet. An empty chapter body means exactly that, not that the layer was skipped or forgotten.
+
+\textbf{Open, unresolved methodological questions:} see \autoref{app:process} for the full tracker -- most importantly, what ``equivalent fault'' means across the classical and quantum substrates (\autoref{app:fault}), and whether injection timing should be tied to real NMDB cosmic-ray flux data.
+
+\textbf{For visiting readers (Sergio, Ricard):} this document tracks the project chapter-by-chapter as each layer is actually built, rather than being written as a finished paper. Please read status markers literally.
+\end{tcolorbox}
