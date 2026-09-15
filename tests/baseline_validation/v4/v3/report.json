@@ -1,0 +1,261 @@
+{
+  "test": "v3",
+  "pass": false,
+  "details": {
+    "runs": [
+      {
+        "level": 1,
+        "bit": 0,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 2.690561e-16,
+        "E_final": 2.388513e-16,
+        "cls": "benign",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 1,
+        "bit": 30,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 1.318149e-09,
+        "E_final": 3.847164e-11,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 1,
+        "bit": 51,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 0.002764359,
+        "E_final": 8.068093e-05,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 1,
+        "bit": 55,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 1.467582,
+        "E_final": 0.04283304,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 1
+      },
+      {
+        "level": 1,
+        "bit": 62,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": false,
+        "E_max": 0.005755222,
+        "E_final": 0.0001679727,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 1,
+        "bit": 63,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 0.01151044,
+        "E_final": 0.0003359454,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 2,
+        "bit": 0,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 2.705965e-16,
+        "E_final": 2.633206e-16,
+        "cls": "benign",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 2,
+        "bit": 30,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 1.864681e-10,
+        "E_final": 2.408078e-12,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 2,
+        "bit": 51,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 0.0003910519,
+        "E_final": 5.050053e-06,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 2,
+        "bit": 55,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 0.001290674,
+        "E_final": 1.666778e-05,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 2,
+        "bit": 62,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 0.0,
+        "E_final": NaN,
+        "cls": "detected",
+        "on_boundary": 0,
+        "iters_delta": 469
+      },
+      {
+        "level": 2,
+        "bit": 63,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 0.00259147,
+        "E_final": 3.34663e-05,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 3,
+        "bit": 0,
+        "before_zero": true,
+        "fires_at_S": false,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 0.0,
+        "E_final": 0.0,
+        "cls": "benign",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 3,
+        "bit": 30,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 2.71954e-08,
+        "E_final": 1.241282e-08,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 0
+      },
+      {
+        "level": 3,
+        "bit": 51,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 6968.355,
+        "E_final": 3208.812,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 467
+      },
+      {
+        "level": 3,
+        "bit": 55,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 9555661000.0,
+        "E_final": 4399724000.0,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 467
+      },
+      {
+        "level": 3,
+        "bit": 62,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 0.0,
+        "E_final": NaN,
+        "cls": "detected",
+        "on_boundary": 0,
+        "iters_delta": 469
+      },
+      {
+        "level": 3,
+        "bit": 63,
+        "before_zero": true,
+        "fires_at_S": true,
+        "one_shot": true,
+        "exp_catastrophic": true,
+        "E_max": 32085.43,
+        "E_final": 14777.17,
+        "cls": "persistent",
+        "on_boundary": 0,
+        "iters_delta": 467
+      }
+    ],
+    "boundary_control": {
+      "on_boundary_flag": 1,
+      "no_reproject": {
+        "E_max": 0.04029223,
+        "E_final": 0.0174258,
+        "class": "persistent"
+      },
+      "reproject": {
+        "E_max": 0.001839043,
+        "E_final": 6.680671e-06,
+        "class": "persistent"
+      },
+      "E_final_reduction_factor": 2608.390684109426
+    },
+    "multiplicity_np2": {
+      "E_max_np1": 0.001073,
+      "E_max_np2_rank0": 0.001073,
+      "rel_diff": 0.0
+    }
+  }
+}

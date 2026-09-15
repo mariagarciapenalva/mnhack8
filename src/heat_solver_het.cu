@@ -1459,7 +1459,7 @@ int main(int argc, char** argv) {
                         "detect,d1_first,d2_first,d3_first,d1_max_F,d2_max_F,d1_max_A,d2_max_A,detected_by,"
                         "hybrid,hyb_block_err_max_A,hyb_block_err_max_F,d4_first_F\n");
             fprintf(sf, "%s,%d,%.3e,%d,%d,%s,%s,%d,%g,%g,%g,%g,%d,%d,%d,%ld,%d,%d,"
-                        "%.6e,%.6e,%.6e,%d,%.6e,%.6e,%.3e,%d,%.2f,%.3f,%.3f,%.3f,%s\n",
+                        "%.6e,%.6e,%.6e,%d,%.6e,%.6e,%.3e,%d,%.2f,%.3f,%.3f,%.3f,%s",
                     tag.c_str(), N, (double)dt, n_steps, nprocs, kernel_fast ? "fast" : "gauss",
                     colored ? "colored" : "atomic", reproject,
                     (double)op.kmin, (double)op.kmax, (double)op.rhocmin, (double)op.rhocmax,

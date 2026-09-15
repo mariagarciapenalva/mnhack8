@@ -1,0 +1,11 @@
+tests/baseline_validation/v4/v0_fast_atomic_np1/report.json            PASS 
+tests/baseline_validation/v4/v0_fast_colored_np1/report.json           PASS 
+tests/baseline_validation/v4/v0_gauss_atomic_np1/report.json           PASS 
+tests/baseline_validation/v4/v0_gauss_colored_np1/report.json          PASS 
+tests/baseline_validation/v4/v1/report.json                            PASS 
+tests/baseline_validation/v4/v2/report.json                            PASS 
+tests/baseline_validation/v4/v3/report.json                            FAIL 
+tests/baseline_validation/v4/v4/report.json                            PASS 
+tests/baseline_validation/v4/v5/report.json                            PASS 
+tests/baseline_validation/v4/v7/report.json                            PASS 
+tests/baseline_validation/v4/v8/report.json                            PASS 
