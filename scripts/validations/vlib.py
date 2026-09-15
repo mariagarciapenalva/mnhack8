@@ -30,7 +30,7 @@ def capabilities(binary):
     """Probe the usage text. Returns set of supported flags."""
     r = subprocess.run([binary], capture_output=True, text=True)
     txt = r.stdout + r.stderr
-    return {f for f in ["--verify", "--kernel", "--scatter", "--fi-rank", "--thr", "--reproject-bc"] if f in txt}
+    return {f for f in ["--verify", "--kernel", "--scatter", "--fi-rank", "--thr", "--reproject-bc", "--detect"] if f in txt}
 
 def read_csv(path):
     with open(path) as f:

@@ -13,7 +13,7 @@
 # Each V* writes report.json (pass/fail + numbers), run.log (every command and
 # its output) and figures. summary.txt collects the verdicts.
 # A binary without --verify/--kernel/--scatter (the original file) gets
-# UNSUPPORTED on V0, V2-V5 and only V1 runs -- that IS the result for it.
+# UNSUPPORTED on V0, V2-V6 and only V1 runs -- that IS the result for it.
 # =============================================================================
 set -euo pipefail
 LABEL=${1:?label}; SRC=${2:?solver.cu}; REF=${3:-src/heat_solver.cu}; ARCH=${4:-sm_86}; MAXR=${5:-4}
@@ -36,6 +36,9 @@ echo "== V1 =="; python3 $V/v1_regression.py --bin "$BIN" --ref "$REFBIN" --gen 
 echo "== V2 =="; python3 $V/v2_noise_floor.py --bin "$BIN" --gen $GEN --out "$OUT" || true
 echo "== V3 =="; python3 $V/v3_injection.py  --bin "$BIN" --gen $GEN --out "$OUT" --mpi $MAXR || true
 echo "== V4/V5 =="; python3 $V/v4_v5_equivalence.py --bin "$BIN" --gen $GEN --out "$OUT" --mpi $MAXR || true
+echo "== V6 =="; python3 $V/v6_detection.py --bin "$BIN" --gen $GEN --out "$OUT" --mpi $MAXR || true
+echo "== V7 (quantum substrate, no GPU) =="; python3 scripts/quantum/v7_quantum.py --out "$OUT/v7" || true
+echo "== V8 (hybrid coupling, NumPy) =="; python3 scripts/quantum/v8_hybrid_mock.py --out "$OUT/v8" || true
 
 echo "== summary =="; : > "$OUT/summary.txt"
 for r in $(find "$OUT" -name report.json | sort); do

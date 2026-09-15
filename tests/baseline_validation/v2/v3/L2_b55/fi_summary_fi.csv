@@ -1,0 +1,2 @@
+tag,N,dt,n_steps,nprocs,kernel,scatter,reproject_bc,kmin,kmax,rhocmin,rhocmax,fi_level,fi_rank,fi_step,fi_target,fi_bit,target_on_boundary,E_floor_max,E_floor_final,E_fault_max,step_at_max,E_fault_int,E_fault_final,thr,iters_delta_max,mean_cg_iters_A,solve_ms_A,solve_ms_B,solve_ms_F,class
+fi,32,5.000e-04,40,1,fast,colored,0,0.0209528,22.1538,1,1,2,0,10,16912,55,0,0.000000e+00,0.000000e+00,1.290674e-03,10,1.425414e-06,1.666778e-05,1.000e-13,0,32.23,1685.055,1652.024,1627.063,persistent

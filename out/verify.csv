@@ -1,0 +1,3 @@
+N,dt,t_end,nprocs,kernel,scatter,rel_L2_err,solve_ms,avg_cg_iters
+8,1.000000e-05,2.000000e-02,1,fast,atomic,7.5301511059e-03,2401.076,1.000
+8,1.000000e-05,2.000000e-02,2,fast,atomic,7.5301511059e-03,9467.661,1.000

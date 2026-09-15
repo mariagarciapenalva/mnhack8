@@ -91,6 +91,11 @@
 typedef double real_t;
 #define MPI_REAL_T MPI_DOUBLE
 
+// All solver-internal communication goes through SOLVER_COMM. Without --qrank
+// it is SOLVER_COMM; with --qrank the last world rank is a Python quantum
+// rank (scripts/quantum/qrank.py) and SOLVER_COMM is the split of the rest.
+static MPI_Comm SOLVER_COMM;
+
 #define CUDA_CHECK(call) do {                                                  \
     cudaError_t _e = (call);                                                   \
     if (_e != cudaSuccess) {                                                   \
@@ -118,6 +123,8 @@ struct Grid {
     const real_t* k_cell;      // conductivity per local element
     const real_t* rhoc_cell;   // rho*c per local element
     int  verify;               // 1: source term off (Layer-0 check)
+    int  no_source;            // 1: source term off in production mode (Layer 7/8)
+    int  ic_mode;              // 0: T=0, 1: Gaussian bump (center 0.5, width 0.1)
 };
 
 // -----------------------------------------------------------------------------
@@ -144,6 +151,11 @@ __global__ void flip_bit_global_kernel(real_t* v, long idx, int bit) {
 // -----------------------------------------------------------------------------
 __constant__ real_t c_Mhat[64];
 __constant__ real_t c_Khat[64];
+
+// Peak volumetric source. Named because the Layer-4 range monitor (D3) uses
+// it: the maximum principle bounds the per-step growth of max(T) by
+// dt * SOURCE_QMAX / min(rho c).
+static const real_t SOURCE_QMAX = 1000.0;
 
 // -----------------------------------------------------------------------------
 // Indexing helpers
@@ -177,10 +189,10 @@ bool is_owned(int ix_local, const Grid& g) {
 
 __device__ __forceinline__
 real_t source_at(real_t x, real_t y, real_t z, const Grid& g) {
-    if (g.verify) return 0.0;
+    if (g.verify || g.no_source) return 0.0;
     const real_t cx = 0.5, cy = 0.5, cz = 0.5;
     const real_t sigma = 0.1;
-    const real_t coeff = 1000.0;
+    const real_t coeff = SOURCE_QMAX;
     real_t r2 = (x-cx)*(x-cx) + (y-cy)*(y-cy) + (z-cz)*(z-cz);
     return coeff * exp(-r2 / (2.0 * sigma * sigma));
 }
@@ -440,6 +452,48 @@ void reduce_partials_kernel(const real_t* partial, long n, real_t* result) {
     if (tid == 0) *result = sdata[0];
 }
 
+// ---- Layer 4 (training-free detection) helper kernels ----------------------
+// 1 on interior (non-Dirichlet) nodes, 0 on the boundary.
+__global__ void ones_interior_kernel(real_t* v, Grid g) {
+    long n = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (n >= g.nnodes_local) return;
+    int ix_local = (int)(n / (g.nny * g.nnz));
+    int iy = (int)((n / g.nnz) % g.nny);
+    int iz = (int)(n % g.nnz);
+    v[n] = is_boundary(ix_local, iy, iz, g) ? 0.0 : 1.0;
+}
+
+// Two-stage deterministic min/max over owned nodes.
+__global__ void owned_minmax_partial_kernel(const real_t* x, real_t* pmin, real_t* pmax, Grid g) {
+    extern __shared__ real_t sdata[];
+    real_t* smin = sdata; real_t* smax = sdata + blockDim.x;
+    int tid = threadIdx.x;
+    long i = (long)blockIdx.x * blockDim.x + tid;
+    real_t vmin = 1e300, vmax = -1e300;
+    if (i < g.nnodes_local && is_owned((int)(i / (g.nny * g.nnz)), g)) { vmin = x[i]; vmax = x[i]; }
+    smin[tid] = vmin; smax[tid] = vmax;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) { smin[tid] = fmin(smin[tid], smin[tid + s]); smax[tid] = fmax(smax[tid], smax[tid + s]); }
+        __syncthreads();
+    }
+    if (tid == 0) { pmin[blockIdx.x] = smin[0]; pmax[blockIdx.x] = smax[0]; }
+}
+__global__ void reduce_minmax_kernel(const real_t* pmin, const real_t* pmax, long n, real_t* out2) {
+    extern __shared__ real_t sdata[];
+    real_t* smin = sdata; real_t* smax = sdata + blockDim.x;
+    int tid = threadIdx.x;
+    real_t a = 1e300, b = -1e300;
+    for (long i = tid; i < n; i += blockDim.x) { a = fmin(a, pmin[i]); b = fmax(b, pmax[i]); }
+    smin[tid] = a; smax[tid] = b;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) { smin[tid] = fmin(smin[tid], smin[tid + s]); smax[tid] = fmax(smax[tid], smax[tid + s]); }
+        __syncthreads();
+    }
+    if (tid == 0) { out2[0] = smin[0]; out2[1] = smax[0]; }
+}
+
 // Halo exchange pack/unpack
 __global__
 void pack_face_kernel(const real_t* v, real_t* buf, Grid g, int x_local) {
@@ -456,6 +510,22 @@ void unpack_face_add_kernel(real_t* v, const real_t* buf, Grid g, int x_local) {
     if (idx >= face) return;
     int iy = (int)(idx / g.nnz), iz = (int)(idx % g.nnz);
     v[lnid(x_local, iy, iz, g)] += buf[idx];
+}
+
+// Gaussian-bump initial condition (Layer 7/8): broadband, so propagation is
+// visible; the sine eigenmode just decays.
+__global__
+void gaussian_ic_kernel(real_t* v, Grid g) {
+    long n = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (n >= g.nnodes_local) return;
+    int ix_local = (int)(n / (g.nny * g.nnz));
+    int iy = (int)((n / g.nnz) % g.nny);
+    int iz = (int)(n % g.nnz);
+    real_t x, y, z;
+    node_coords(ix_local, iy, iz, g, x, y, z);
+    real_t r2 = (x-0.5)*(x-0.5) + (y-0.5)*(y-0.5) + (z-0.5)*(z-0.5);
+    v[n] = exp(-r2 / (2.0 * 0.1 * 0.1));
+    if (is_boundary(ix_local, iy, iz, g)) v[n] = 0.0;
 }
 
 // Layer-0 check: exact eigenmode of the homogeneous source-free problem.
@@ -475,6 +545,35 @@ void exact_mode_kernel(real_t* v, Grid g, real_t t, real_t alpha) {
 }
 
 // =============================================================================
+// Hybrid pipeline (Layer 8): the quantum rank owns a 2^m-cube block of
+// interior nodes. Each step the owning solver rank sends the block PLUS its
+// one-node halo (so the quantum side can lift the boundary data), solves the
+// whole domain classically in parallel, receives the quantum block result and
+// overwrites the block. Payload layout: (2^m+2)^3 doubles, x slowest, then
+// two checksum doubles [sum, norm] (D4).
+// =============================================================================
+struct QBlock {
+    int enabled = 0;
+    int x0 = 0, y0 = 0, z0 = 0, m = 0;   // global node index of the block corner, block = 2^m per axis
+    int owner = -1;                      // SOLVER_COMM rank owning the block (incl. halo)
+    long n_side = 0, n_pay = 0;          // side incl. halo, payload doubles
+};
+
+__global__ void pack_block_kernel(const real_t* T, real_t* buf, Grid g, int lx0, int y0, int z0, long side) {
+    long t = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= side * side * side) return;
+    int i = (int)(t / (side * side)), j = (int)((t / side) % side), k = (int)(t % side);
+    buf[t] = T[lnid(lx0 - 1 + i, y0 - 1 + j, z0 - 1 + k, g)];
+}
+__global__ void unpack_block_kernel(real_t* T, const real_t* buf, Grid g, int lx0, int y0, int z0, long side) {
+    long t = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    long inner = side - 2;
+    if (t >= inner * inner * inner) return;
+    int i = (int)(t / (inner * inner)), j = (int)((t / inner) % inner), k = (int)(t % inner);
+    T[lnid(lx0 + i, y0 + j, z0 + k, g)] = buf[t];
+}
+
+// =============================================================================
 // HeatOperator
 // =============================================================================
 class HeatOperator {
@@ -484,6 +583,25 @@ public:
     FIConfig fi;
     int kernel_fast = 1;   // --kernel fast|gauss
     int colored     = 0;   // --scatter colored|atomic
+
+    // ---- Layer 4: training-free detectors (--detect) -----------------------
+    // D1  ABFT checksum on every operator application (Huang & Abraham 1984):
+    //     for symmetric A and interior-supported x,  1_int^T (A x) == (A 1_int)^T x.
+    //     w_M = M 1_int and w_A = (M + dt K) 1_int are computed once, unprojected.
+    //     Checked AFTER the halo exchange, so it sees both scatter (R) and
+    //     in-transit (H) corruption. Cost: 3 dot products per matvec.
+    // D2  true post-solve residual ||b - A T^{n+1}|| / ||b|| with a fresh
+    //     matvec: catches solver inconsistency and silent non-convergence.
+    // D3  maximum-principle range check: min T >= -eps, and
+    //     max T^{n+1} <= max T^n + 2 dt SOURCE_QMAX / min(rho c).
+    int    detect = 0;
+    real_t chk_tol = 1e-10;
+    real_t *d_ones_int = nullptr, *d_wM = nullptr, *d_wA = nullptr;
+    real_t *d_pmin = nullptr, *d_pmax = nullptr, *d_mm = nullptr;
+    real_t norm_wM = 0, norm_wA = 0;
+    // per-step accumulators (reset by the driver each step)
+    real_t abft_step_max = 0;   // max relative checksum error in this step
+    long   abft_step_calls = 0;
 
     real_t *d_kcell = nullptr, *d_rhoccell = nullptr;
     real_t *d_diag = nullptr, *d_F = nullptr;
@@ -584,8 +702,8 @@ public:
             lmin[1] = fmin(lmin[1], h_rhoc[i]); lmax[1] = fmax(lmax[1], h_rhoc[i]);
         }
         real_t gmin[2], gmax[2];
-        MPI_Allreduce(lmin, gmin, 2, MPI_REAL_T, MPI_MIN, MPI_COMM_WORLD);
-        MPI_Allreduce(lmax, gmax, 2, MPI_REAL_T, MPI_MAX, MPI_COMM_WORLD);
+        MPI_Allreduce(lmin, gmin, 2, MPI_REAL_T, MPI_MIN, SOLVER_COMM);
+        MPI_Allreduce(lmax, gmax, 2, MPI_REAL_T, MPI_MAX, SOLVER_COMM);
         kmin = gmin[0]; kmax = gmax[0]; rhocmin = gmin[1]; rhocmax = gmax[1];
         CUDA_CHECK(cudaMalloc(&d_kcell,    ne_slab * sizeof(real_t)));
         CUDA_CHECK(cudaMalloc(&d_rhoccell, ne_slab * sizeof(real_t)));
@@ -597,12 +715,12 @@ public:
     // ---- setup --------------------------------------------------------------
     void setup(int nx, int ny, int nz, real_t Lx, real_t Ly, real_t Lz,
                real_t dt_in, MPI_Comm comm, const char* field_prefix,
-               int verify, int kfast, int use_colored) {
+               int verify, int kfast, int use_colored, int use_detect = 0) {
         MPI_Comm_rank(comm, &g.rank);
         MPI_Comm_size(comm, &g.nprocs);
         g.nx = nx; g.ny = ny; g.nz = nz;
         g.hx = Lx / nx; g.hy = Ly / ny; g.hz = Lz / nz;
-        g.verify = verify;
+        g.verify = verify; g.no_source = 0; g.ic_mode = 0;
         kernel_fast = kfast; colored = use_colored;
         if (nx % g.nprocs != 0) {
             if (g.rank == 0) fprintf(stderr, "nx (%d) must be divisible by nprocs (%d)\n", nx, g.nprocs);
@@ -654,12 +772,14 @@ public:
             apply_dirichlet_value_kernel<<<blocks_node, threads_node>>>(d_F, g, 0.0);
             CUDA_CHECK_LAUNCH();
         }
+        if (use_detect) setup_detectors();
     }
 
     void cleanup() {
         cudaFree(d_kcell); cudaFree(d_rhoccell); cudaFree(d_diag); cudaFree(d_F);
         cudaFree(d_send_l); cudaFree(d_send_r); cudaFree(d_recv_l); cudaFree(d_recv_r);
         cudaFree(d_partial); cudaFree(d_dot_result);
+        cudaFree(d_ones_int); cudaFree(d_wM); cudaFree(d_wA); cudaFree(d_pmin); cudaFree(d_pmax); cudaFree(d_mm);
         free(h_send_l); free(h_send_r); free(h_recv_l); free(h_recv_r);
     }
 
@@ -687,12 +807,12 @@ public:
 
         MPI_Request reqs[4]; int nr = 0;
         if (g.rank > 0) {
-            MPI_Irecv(h_recv_l, face, MPI_REAL_T, g.rank-1, 0, MPI_COMM_WORLD, &reqs[nr++]);
-            MPI_Isend(h_send_l, face, MPI_REAL_T, g.rank-1, 1, MPI_COMM_WORLD, &reqs[nr++]);
+            MPI_Irecv(h_recv_l, face, MPI_REAL_T, g.rank-1, 0, SOLVER_COMM, &reqs[nr++]);
+            MPI_Isend(h_send_l, face, MPI_REAL_T, g.rank-1, 1, SOLVER_COMM, &reqs[nr++]);
         }
         if (g.rank < g.nprocs - 1) {
-            MPI_Irecv(h_recv_r, face, MPI_REAL_T, g.rank+1, 1, MPI_COMM_WORLD, &reqs[nr++]);
-            MPI_Isend(h_send_r, face, MPI_REAL_T, g.rank+1, 0, MPI_COMM_WORLD, &reqs[nr++]);
+            MPI_Irecv(h_recv_r, face, MPI_REAL_T, g.rank+1, 1, SOLVER_COMM, &reqs[nr++]);
+            MPI_Isend(h_send_r, face, MPI_REAL_T, g.rank+1, 0, SOLVER_COMM, &reqs[nr++]);
         }
         MPI_Waitall(nr, reqs, MPI_STATUSES_IGNORE);
         if (g.rank > 0) {
@@ -709,7 +829,7 @@ public:
     // ---- operator -----------------------------------------------------------
     // y = (M + dt_eff K) x, with halo sum and Dirichlet projection.
     // allow_fi: whether a pending level-R injection may fire in this call.
-    void apply_operator(const real_t* d_x, real_t* d_y, real_t dt_eff, bool allow_fi) {
+    void apply_operator(const real_t* d_x, real_t* d_y, real_t dt_eff, bool allow_fi, bool project = true) {
         zero_kernel<<<blocks_node, threads_node>>>(d_y, g.nnodes_local);
         CUDA_CHECK_LAUNCH();
         FIConfig f = fi;
@@ -727,8 +847,52 @@ public:
         }
         if (allow_fi && fi.armed && fi.level == 2) fi.armed = 0;   // one-shot
         halo_exchange_sum(d_y);
-        apply_dirichlet_value_kernel<<<blocks_node, threads_node>>>(d_y, g, 0.0);
+        if (project) {
+            apply_dirichlet_value_kernel<<<blocks_node, threads_node>>>(d_y, g, 0.0);
+            CUDA_CHECK_LAUNCH();
+        }
+        if (detect && project) {
+            // D1: 1_int^T y  vs  w^T x, scaled by ||w|| ||x|| (Cauchy-Schwarz bound)
+            const real_t* w  = (dt_eff == 0.0) ? d_wM : d_wA;
+            const real_t  nw = (dt_eff == 0.0) ? norm_wM : norm_wA;
+            real_t s  = dot(d_y, d_ones_int);
+            real_t c  = dot(w, d_x);
+            real_t nx = norm2(d_x);
+            real_t rel = fabs(s - c) / (nw * nx + 1e-300);
+            if (!std::isfinite((double)rel)) rel = 1e300;
+            abft_step_max = fmax(abft_step_max, rel);
+            abft_step_calls++;
+        }
+    }
+
+    // min/max of x over owned nodes (global)
+    void minmax(const real_t* d_x, real_t& vmin, real_t& vmax) {
+        owned_minmax_partial_kernel<<<blocks_node, threads_node, 2*threads_node*sizeof(real_t)>>>(d_x, d_pmin, d_pmax, g);
         CUDA_CHECK_LAUNCH();
+        reduce_minmax_kernel<<<1, 1024, 2*1024*sizeof(real_t)>>>(d_pmin, d_pmax, blocks_node, d_mm);
+        CUDA_CHECK_LAUNCH();
+        real_t loc[2], gmn, gmx;
+        CUDA_CHECK(cudaMemcpy(loc, d_mm, 2 * sizeof(real_t), cudaMemcpyDeviceToHost));
+        MPI_Allreduce(&loc[0], &gmn, 1, MPI_REAL_T, MPI_MIN, SOLVER_COMM);
+        MPI_Allreduce(&loc[1], &gmx, 1, MPI_REAL_T, MPI_MAX, SOLVER_COMM);
+        vmin = gmn; vmax = gmx;
+    }
+
+    // Build the ABFT checksum vectors. Called at the end of setup with detect
+    // still 0 so the setup matvecs are not themselves checked.
+    void setup_detectors() {
+        CUDA_CHECK(cudaMalloc(&d_ones_int, g.nnodes_local * sizeof(real_t)));
+        CUDA_CHECK(cudaMalloc(&d_wM, g.nnodes_local * sizeof(real_t)));
+        CUDA_CHECK(cudaMalloc(&d_wA, g.nnodes_local * sizeof(real_t)));
+        CUDA_CHECK(cudaMalloc(&d_pmin, blocks_node * sizeof(real_t)));
+        CUDA_CHECK(cudaMalloc(&d_pmax, blocks_node * sizeof(real_t)));
+        CUDA_CHECK(cudaMalloc(&d_mm, 2 * sizeof(real_t)));
+        ones_interior_kernel<<<blocks_node, threads_node>>>(d_ones_int, g);
+        CUDA_CHECK_LAUNCH();
+        apply_operator(d_ones_int, d_wM, 0.0, false, false);   // unprojected M 1_int
+        apply_operator(d_ones_int, d_wA, dt,  false, false);   // unprojected A 1_int
+        norm_wM = norm2(d_wM); norm_wA = norm2(d_wA);
+        detect = 1;
     }
 
     void apply_matvec(const real_t* d_x, real_t* d_y) { apply_operator(d_x, d_y, dt, true); }
@@ -741,7 +905,7 @@ public:
     // b = M T^n + dt F. Level H (if armed) fires in this call's halo exchange.
     void build_rhs(const real_t* d_Tn, real_t* d_b) {
         apply_operator(d_Tn, d_b, 0.0, false);
-        if (!g.verify) {
+        if (!g.verify && !g.no_source) {
             axpy_kernel<<<blocks_node, threads_node>>>(dt, d_F, d_b, g.nnodes_local);
             CUDA_CHECK_LAUNCH();
         }
@@ -755,7 +919,7 @@ public:
         CUDA_CHECK_LAUNCH();
         real_t local, global;
         CUDA_CHECK(cudaMemcpy(&local, d_dot_result, sizeof(real_t), cudaMemcpyDeviceToHost));
-        MPI_Allreduce(&local, &global, 1, MPI_REAL_T, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&local, &global, 1, MPI_REAL_T, MPI_SUM, SOLVER_COMM);
         return global;
     }
     real_t norm2(const real_t* d_x) { return sqrt(dot(d_x, d_x)); }
@@ -803,17 +967,33 @@ static void host_snapshot(HeatOperator& op, const real_t* d_T, std::vector<real_
     CUDA_CHECK(cudaMemcpy(out.data(), d_T, op.g.nnodes_local * sizeof(real_t), cudaMemcpyDeviceToHost));
 }
 
-// ||a - b|| / ||b|| over owned nodes, global.
-static real_t global_rel_err(HeatOperator& op, const std::vector<real_t>& a, const std::vector<real_t>& b) {
+// ||a - b|| / ||b|| over owned nodes, global. If spread != nullptr also returns
+// the fraction of owned nodes with |a-b| > 1e-3 * max|a-b| (spatial spread of
+// the perturbation: ~0 for a fresh point fault, growing as diffusion smears it).
+static real_t global_rel_err(HeatOperator& op, const std::vector<real_t>& a, const std::vector<real_t>& b,
+                             real_t* spread = nullptr) {
     const Grid& g = op.g;
-    double num = 0.0, den = 0.0;
+    double num = 0.0, den = 0.0, dmax = 0.0; long nown = 0;
     for (long n = 0; n < g.nnodes_local; ++n) {
         if (!is_owned((int)(n / (g.nny * g.nnz)), g)) continue;
         double d = (double)a[n] - (double)b[n];
         num += d * d; den += (double)b[n] * (double)b[n];
+        if (fabs(d) > dmax) dmax = fabs(d);
+        ++nown;
     }
     double s[2] = {num, den}, gl[2];
-    MPI_Allreduce(s, gl, 2, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(s, gl, 2, MPI_DOUBLE, MPI_SUM, SOLVER_COMM);
+    if (spread) {
+        double gmax; MPI_Allreduce(&dmax, &gmax, 1, MPI_DOUBLE, MPI_MAX, SOLVER_COMM);
+        long cnt = 0;
+        for (long n = 0; n < g.nnodes_local; ++n) {
+            if (!is_owned((int)(n / (g.nny * g.nnz)), g)) continue;
+            if (fabs((double)a[n] - (double)b[n]) > 1e-3 * gmax) ++cnt;
+        }
+        long tot[2] = {cnt, nown}, gt[2];
+        MPI_Allreduce(tot, gt, 2, MPI_LONG, MPI_SUM, SOLVER_COMM);
+        *spread = (gmax > 0 && gt[1] > 0) ? (real_t)gt[0] / (real_t)gt[1] : 0.0;
+    }
     if (gl[1] < 1e-300) gl[1] = 1.0;
     return sqrt(gl[0] / gl[1]);
 }
@@ -821,21 +1001,41 @@ static real_t global_rel_err(HeatOperator& op, const std::vector<real_t>& a, con
 struct RunResult {
     std::vector<int>    snap_steps;
     std::vector<real_t> E;          // vs reference (empty for the reference run)
+    std::vector<real_t> spread;     // fraction of nodes carrying the perturbation
     std::vector<int>    cg_iters;   // per step
     double solve_ms = 0.0;          // build_rhs + pcg only (no snapshots, no logging)
     int nonfinite = 0;
+    // Layer 4 (per step, only when --detect)
+    std::vector<real_t> d1_abft, d2_resid, d3_tmin, d3_tmax;
+    real_t d1_max = 0, d2_max = 0;
+    int d1_first = -1, d2_first = -1, d3_first = -1;   // first step each detector fired
+    // Layer 8 (per step, only with --qrank): in-situ quantum-vs-classical block error, D4 handoff checksum
+    std::vector<real_t> hyb_block_err, hyb_d4;
+    int d4_first = -1;
 };
 
 // One full simulation from T=0. If ref != nullptr, E(t) vs *ref is computed at
 // snapshot steps (streaming: only the reference run keeps its snapshots).
+struct HybridCtx {          // everything the hybrid exchange needs, or enabled = 0
+    QBlock qb;
+    int qrank_world = -1;    // world rank of the Python process
+    real_t *d_buf = nullptr; std::vector<real_t> h_send, h_recv, h_cls;
+    std::string dump_dir; std::string dump_tag;   // --dump-snaps
+};
+
 static void run_case(HeatOperator& op, int n_steps, int snap_every, FIConfig fi_cfg,
                      int reproject_bc,
                      real_t* d_T, real_t* d_b, real_t* d_r, real_t* d_z, real_t* d_p, real_t* d_Ap,
                      std::vector<std::vector<real_t>>* keep_snaps,
                      const std::vector<std::vector<real_t>>* ref,
-                     RunResult& res) {
+                     RunResult& res, HybridCtx* hy = nullptr, const char* case_tag = "") {
     long n = op.g.nnodes_local;
     CUDA_CHECK(cudaMemset(d_T, 0, n * sizeof(real_t)));
+    if (op.g.ic_mode == 1) { gaussian_ic_kernel<<<op.blocks_node, op.threads_node>>>(d_T, op.g); CUDA_CHECK_LAUNCH(); }
+    const bool hybrid = hy && hy->qb.enabled;
+    const int  lx0 = hybrid ? hy->qb.x0 - op.g.ix_start : 0;
+    const long side = hybrid ? hy->qb.n_side : 0, inner = side > 0 ? side - 2 : 0;
+    const bool i_own = hybrid && op.g.rank == hy->qb.owner;
     op.fi = FIConfig();
     res = RunResult();
     if (keep_snaps) keep_snaps->clear();
@@ -855,8 +1055,54 @@ static void run_case(HeatOperator& op, int n_steps, int snap_every, FIConfig fi_
             }
         }
         cudaEventRecord(t0);
+        // ---- hybrid: ship T^n block (+halo) to the quantum rank before the classical solve
+        MPI_Request qreq = MPI_REQUEST_NULL;
+        if (i_own) {
+            long tb = 256, bb = (side*side*side + tb - 1) / tb;
+            pack_block_kernel<<<bb, tb>>>(d_T, hy->d_buf, op.g, lx0, hy->qb.y0, hy->qb.z0, side);
+            CUDA_CHECK_LAUNCH();
+            CUDA_CHECK(cudaMemcpy(hy->h_send.data(), hy->d_buf, side*side*side*sizeof(real_t), cudaMemcpyDeviceToHost));
+            // H2: in-transit corruption of the handoff payload (level 4), one-shot
+            if (op.fi.armed && op.fi.level == 4) {          // owner rank only (i_own)
+                long idx = op.fi.target % (side*side*side);
+                unsigned long long* w = reinterpret_cast<unsigned long long*>(&hy->h_send[idx]);
+                *w ^= (1ULL << op.fi.bit); op.fi.armed = 0;
+            }
+            double sum = 0, nrm = 0;
+            for (long t = 0; t < side*side*side; ++t) { sum += hy->h_send[t]; nrm += hy->h_send[t]*hy->h_send[t]; }
+            hy->h_send[side*side*side] = sum; hy->h_send[side*side*side + 1] = sqrt(nrm);
+            MPI_Isend(hy->h_send.data(), (int)hy->qb.n_pay, MPI_REAL_T, hy->qrank_world, 1000 + step, MPI_COMM_WORLD, &qreq);
+        }
         op.build_rhs(d_T, d_b);
         int it = pcg_solve(op, d_b, d_T, 500, 1e-8, d_r, d_z, d_p, d_Ap);
+        // ---- hybrid: receive the quantum block, compare with the classical block, overwrite
+        if (i_own) {
+            MPI_Wait(&qreq, MPI_STATUS_IGNORE);
+            long nin = inner*inner*inner;
+            MPI_Recv(hy->h_recv.data(), (int)(nin + 2), MPI_REAL_T, hy->qrank_world, 2000 + step, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            double sum = 0, nrm = 0;
+            for (long t = 0; t < nin; ++t) { sum += hy->h_recv[t]; nrm += hy->h_recv[t]*hy->h_recv[t]; }
+            real_t d4 = fmax(fabs(sum - hy->h_recv[nin]) / (fabs(hy->h_recv[nin]) + 1e-300),
+                             fabs(sqrt(nrm) - hy->h_recv[nin+1]) / (fabs(hy->h_recv[nin+1]) + 1e-300));
+            // classical block result (for the in-situ substrate comparison and D4-physics)
+            long tb = 256, bb = (side*side*side + tb - 1) / tb;
+            pack_block_kernel<<<bb, tb>>>(d_T, hy->d_buf, op.g, lx0, hy->qb.y0, hy->qb.z0, side);
+            CUDA_CHECK_LAUNCH();
+            CUDA_CHECK(cudaMemcpy(hy->h_cls.data(), hy->d_buf, side*side*side*sizeof(real_t), cudaMemcpyDeviceToHost));
+            double num = 0, den = 0; long t = 0;
+            for (int i = 1; i < side-1; ++i) for (int j = 1; j < side-1; ++j) for (int k = 1; k < side-1; ++k, ++t) {
+                double c = hy->h_cls[(long)i*side*side + (long)j*side + k], q = hy->h_recv[t];
+                num += (q - c)*(q - c); den += c*c;
+            }
+            real_t eblk = sqrt(num / (den > 0 ? den : 1.0));
+            res.hyb_block_err.push_back(eblk); res.hyb_d4.push_back(d4);
+            if (!(d4 <= 1e-12) && res.d4_first < 0) res.d4_first = step;
+            if (!std::isfinite((double)eblk)) res.nonfinite = 1;
+            CUDA_CHECK(cudaMemcpy(hy->d_buf, hy->h_recv.data(), nin*sizeof(real_t), cudaMemcpyHostToDevice));
+            long bi = (nin + tb - 1) / tb;
+            unpack_block_kernel<<<bi, tb>>>(d_T, hy->d_buf, op.g, lx0, hy->qb.y0, hy->qb.z0, side);
+            CUDA_CHECK_LAUNCH();
+        }
         if (reproject_bc) {
             apply_dirichlet_value_kernel<<<op.blocks_node, op.threads_node>>>(d_T, op.g, 0.0);
             CUDA_CHECK_LAUNCH();
@@ -866,14 +1112,48 @@ static void run_case(HeatOperator& op, int n_steps, int snap_every, FIConfig fi_
         op.fi.armed = 0;
         res.cg_iters.push_back(it);
 
+        if (op.detect) {
+            // D1 accumulated during the step's matvecs (build_rhs + CG)
+            real_t d1 = op.abft_step_max;
+            // D2: true residual with a fresh (clean, disarmed) matvec
+            op.apply_operator(d_T, d_Ap, op.dt, false);
+            copy_kernel<<<op.blocks_node, op.threads_node>>>(d_b, d_r, n); CUDA_CHECK_LAUNCH();
+            axpy_kernel<<<op.blocks_node, op.threads_node>>>(-1.0, d_Ap, d_r, n); CUDA_CHECK_LAUNCH();
+            real_t bn = op.norm2(d_b); if (bn < 1e-300) bn = 1.0;
+            real_t d2 = op.norm2(d_r) / bn;
+            // D3: maximum-principle range
+            real_t tmin, tmax; op.minmax(d_T, tmin, tmax);
+            real_t prev_max = res.d3_tmax.empty() ? 0.0 : res.d3_tmax.back();
+            real_t growth_bound = prev_max + 2.0 * op.dt * (op.g.verify ? 0.0 : SOURCE_QMAX) / op.rhocmin
+                                  + 1e-8 * (fabs(prev_max) + 1e-300);
+            bool d3_fire = !(tmin >= -1e-6 * (fabs(prev_max) + 1e-300)) || !(tmax <= growth_bound)
+                           || !std::isfinite((double)tmin) || !std::isfinite((double)tmax);
+            res.d1_abft.push_back(d1); res.d2_resid.push_back(d2);
+            res.d3_tmin.push_back(tmin); res.d3_tmax.push_back(tmax);
+            if (!(d1 <= op.chk_tol) && res.d1_first < 0) res.d1_first = step;
+            if (!(d2 <= 1e-6)       && res.d2_first < 0) res.d2_first = step;
+            if (d3_fire             && res.d3_first < 0) res.d3_first = step;
+            if (std::isfinite((double)d1)) res.d1_max = fmax(res.d1_max, d1); else res.d1_max = 1e300;
+            if (std::isfinite((double)d2)) res.d2_max = fmax(res.d2_max, d2); else res.d2_max = 1e300;
+            op.abft_step_max = 0; op.abft_step_calls = 0;
+        }
+
         bool snap = (snap_every > 0 && step % snap_every == 0) || step == n_steps - 1;
         if (snap) {
             if (keep_snaps) { keep_snaps->emplace_back(); host_snapshot(op, d_T, keep_snaps->back()); }
+            if (hy && !hy->dump_dir.empty()) {          // --dump-snaps: full field per snapshot
+                if (!keep_snaps) host_snapshot(op, d_T, tmp);
+                const std::vector<real_t>& v = keep_snaps ? keep_snaps->back() : tmp;
+                char pth[700]; snprintf(pth, sizeof(pth), "%s/snap_%s_%s_%05d_rank%d.bin",
+                                        hy->dump_dir.c_str(), hy->dump_tag.c_str(), case_tag, step, op.g.rank);
+                FILE* f = fopen(pth, "wb"); if (f) { fwrite(v.data(), sizeof(real_t), v.size(), f); fclose(f); }
+            }
             if (ref) {
                 host_snapshot(op, d_T, tmp);
-                real_t E = global_rel_err(op, tmp, (*ref)[si]);
+                real_t sp = 0;
+                real_t E = global_rel_err(op, tmp, (*ref)[si], &sp);
                 if (!std::isfinite((double)E)) res.nonfinite = 1;
-                res.E.push_back(E);
+                res.E.push_back(E); res.spread.push_back(sp);
             }
             res.snap_steps.push_back(step);
             ++si;
@@ -909,7 +1189,7 @@ static int target_on_boundary(HeatOperator& op, const FIConfig& fi) {
             flag = (iy == 0 || iy == g.ny || iz == 0 || iz == g.nz);
         }
     }
-    MPI_Bcast(&flag, 1, MPI_INT, fi.rank, MPI_COMM_WORLD);
+    MPI_Bcast(&flag, 1, MPI_INT, fi.rank, SOLVER_COMM);
     return flag;
 }
 
@@ -966,7 +1246,8 @@ static void usage(const char* prog) {
       "usage: %s N t_final dt field_prefix [outdir]\n"
       "   [--fi LEVEL STEP TARGET BIT] [--fi-rank R] [--snap S] [--tag NAME]\n"
       "   [--kernel gauss|fast] [--scatter atomic|colored] [--thr X]\n"
-      "   [--reproject-bc] [--verify]\n"
+      "   [--reproject-bc] [--detect] [--verify] [--no-source] [--ic zero|gaussian] [--dump-snaps]\n"
+      "   [--qrank --qblock X0 Y0 Z0 m]   (hybrid: last world rank = scripts/quantum/qrank.py)\n"
       "  LEVEL: 1=G global memory, 2=R accumulator, 3=H halo staging buffer\n"
       "  BIT:   0-51 mantissa, 52-62 exponent, 63 sign\n", prog);
 }
@@ -976,9 +1257,24 @@ static void usage(const char* prog) {
 // =============================================================================
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
+    int world_rank, world_size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    // --qrank must be known before anything else: pre-scan argv for it.
+    int qrank_mode = 0;
+    for (int i = 1; i < argc; ++i) if (!strcmp(argv[i], "--qrank")) qrank_mode = 1;
+    if (qrank_mode) {
+        if (world_size < 2) { if (world_rank == 0) fprintf(stderr, "--qrank needs >= 2 world ranks (last one is the quantum rank)\n"); MPI_Abort(MPI_COMM_WORLD, 1); }
+        int color = (world_rank == world_size - 1) ? 1 : 0;
+        MPI_Comm_split(MPI_COMM_WORLD, color, world_rank, &SOLVER_COMM);
+        if (color == 1) { fprintf(stderr, "this executable is not the quantum rank; launch qrank.py as the last rank\n"); MPI_Abort(MPI_COMM_WORLD, 1); }
+    } else {
+        SOLVER_COMM = MPI_COMM_WORLD;
+    }
     int rank, nprocs;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(SOLVER_COMM, &rank);
+    MPI_Comm_size(SOLVER_COMM, &nprocs);
+    const int QRANK = world_size - 1;    // world rank of the quantum process
 
     int n_gpus = 0; cudaGetDeviceCount(&n_gpus);
     if (n_gpus == 0) { if (rank == 0) fprintf(stderr, "No CUDA devices\n"); MPI_Abort(MPI_COMM_WORLD, 1); }
@@ -991,7 +1287,9 @@ int main(int argc, char** argv) {
     const char* field_prefix = argv[4];
     std::string outdir = "out", tag = "run";
     FIConfig fi_cfg;
-    int snap_every = 5, verify_mode = 0, kernel_fast = 1, colored = 0, reproject = 0;
+    int snap_every = 5, verify_mode = 0, kernel_fast = 1, colored = 0, reproject = 0, detect = 0;
+    int no_source = 0, ic_mode = 0, dump_snaps = 0;
+    QBlock qb;
     real_t thr_user = 1e-13;
     for (int i = 5; i < argc; ++i) {
         if (!strcmp(argv[i], "--fi") && i + 4 < argc) {
@@ -1004,6 +1302,13 @@ int main(int argc, char** argv) {
         } else if (!strcmp(argv[i], "--kernel") && i + 1 < argc)  { kernel_fast = strcmp(argv[++i], "gauss") != 0;
         } else if (!strcmp(argv[i], "--scatter") && i + 1 < argc) { colored = !strcmp(argv[++i], "colored");
         } else if (!strcmp(argv[i], "--reproject-bc")) { reproject = 1;
+        } else if (!strcmp(argv[i], "--detect"))       { detect = 1;
+        } else if (!strcmp(argv[i], "--no-source"))    { no_source = 1;
+        } else if (!strcmp(argv[i], "--dump-snaps"))   { dump_snaps = 1;
+        } else if (!strcmp(argv[i], "--qrank"))        { /* pre-scanned */
+        } else if (!strcmp(argv[i], "--ic") && i + 1 < argc) { ic_mode = !strcmp(argv[++i], "gaussian");
+        } else if (!strcmp(argv[i], "--qblock") && i + 4 < argc) {
+            qb.enabled = 1; qb.x0 = atoi(argv[++i]); qb.y0 = atoi(argv[++i]); qb.z0 = atoi(argv[++i]); qb.m = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--verify"))       { verify_mode = 1;
         } else if (argv[i][0] != '-') { outdir = argv[i];
         } else { if (rank == 0) { fprintf(stderr, "unknown option %s\n", argv[i]); usage(argv[0]); } MPI_Abort(MPI_COMM_WORLD, 1); }
@@ -1014,6 +1319,10 @@ int main(int argc, char** argv) {
     }
     if (fi_cfg.level == 3 && (nprocs < 2 || fi_cfg.rank >= nprocs - 1)) {
         if (rank == 0) fprintf(stderr, "level H needs >= 2 ranks and --fi-rank < nprocs-1\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    if (fi_cfg.level == 4 && !(qrank_mode && qb.enabled)) {
+        if (rank == 0) fprintf(stderr, "level 4 (handoff transit) needs --qrank --qblock\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
     if (fi_cfg.level > 0 && (fi_cfg.bit < 0 || fi_cfg.bit > 63)) {
@@ -1033,7 +1342,41 @@ int main(int argc, char** argv) {
     }
 
     HeatOperator op;
-    op.setup(nx, ny, nz, 1.0, 1.0, 1.0, dt, MPI_COMM_WORLD, field_prefix, verify_mode, kernel_fast, colored);
+    op.setup(nx, ny, nz, 1.0, 1.0, 1.0, dt, SOLVER_COMM, field_prefix, verify_mode, kernel_fast, colored, detect);
+    op.g.no_source = no_source; op.g.ic_mode = ic_mode;
+
+    // ---- hybrid setup ----------------------------------------------------------
+    HybridCtx hy; hy.qb = qb; hy.qrank_world = QRANK;
+    if (dump_snaps) { hy.dump_dir = outdir; hy.dump_tag = tag; }
+    if (qrank_mode) {
+        if (!qb.enabled) { if (rank == 0) fprintf(stderr, "--qrank needs --qblock\n"); MPI_Abort(MPI_COMM_WORLD, 1); }
+        int bs = 1 << qb.m;
+        if (qb.x0 < 1 || qb.y0 < 1 || qb.z0 < 1 || qb.x0 + bs > N || qb.y0 + bs > N || qb.z0 + bs > N) {
+            if (rank == 0) fprintf(stderr, "--qblock must be strictly interior with its halo: 1 <= X0, X0+2^m <= N\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        if (op.kmin != op.kmax || op.rhocmin != op.rhocmax) {
+            if (rank == 0) fprintf(stderr, "hybrid mode needs a homogeneous field (variable-coefficient Hamiltonian is future work)\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        // owner: the rank whose owned x-cells [ix_start, ix_start+nx_local) contain x0-1 .. x0+bs
+        hy.qb.owner = -1;
+        for (int r = 0; r < nprocs; ++r) {
+            int s0 = r * op.g.nx_local, s1 = s0 + op.g.nx_local;   // owned nodes: [s0, s1) (+s1 on last rank)
+            if (qb.x0 - 1 >= s0 && qb.x0 + bs <= s1) { hy.qb.owner = r; break; }
+        }
+        if (hy.qb.owner < 0) { if (rank == 0) fprintf(stderr, "--qblock (with halo) must lie inside one rank's slab\n"); MPI_Abort(MPI_COMM_WORLD, 1); }
+        hy.qb.n_side = bs + 2; hy.qb.n_pay = hy.qb.n_side*hy.qb.n_side*hy.qb.n_side + 2;
+        hy.h_send.assign(hy.qb.n_pay, 0.0); hy.h_recv.assign((long)bs*bs*bs + 2, 0.0); hy.h_cls.assign(hy.qb.n_pay, 0.0);
+        CUDA_CHECK(cudaMalloc(&hy.d_buf, hy.qb.n_pay * sizeof(real_t)));
+        if (rank == hy.qb.owner) {
+            // handshake: [m, n_steps, dt, alpha, n_cases, N]  (2 or 3 twin-run cases per invocation)
+            double cfg[6] = {(double)qb.m, (double)n_steps, (double)dt, (double)(op.kmin / op.rhocmin), fi_cfg.level > 0 ? 3.0 : 2.0, (double)N};
+            MPI_Send(cfg, 6, MPI_DOUBLE, QRANK, 999, MPI_COMM_WORLD);
+        }
+        if (rank == 0) printf("Hybrid: quantum block %d^3 at (%d,%d,%d), owner rank %d, quantum world rank %d\n",
+                              bs, qb.x0, qb.y0, qb.z0, hy.qb.owner, QRANK);
+    }
     if (rank == 0)
         printf("Material: k in [%g, %g] (contrast %.3g), rho*c in [%g, %g]\n",
                (double)op.kmin, (double)op.kmax, (double)(op.kmax/op.kmin), (double)op.rhocmin, (double)op.rhocmax);
@@ -1050,26 +1393,26 @@ int main(int argc, char** argv) {
         // ---- twin-run protocol ---------------------------------------------
         std::vector<std::vector<real_t>> snapA;
         RunResult rA, rB, rF;
-        run_case(op, n_steps, snap_every, FIConfig(), reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, &snapA, nullptr, rA);
+        run_case(op, n_steps, snap_every, FIConfig(), reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, &snapA, nullptr, rA, &hy, "cleanA");
         write_field(op, snapA.back(), outdir, tag + "_clean");
-        run_case(op, n_steps, snap_every, FIConfig(), reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, nullptr, &snapA, rB);
+        run_case(op, n_steps, snap_every, FIConfig(), reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, nullptr, &snapA, rB, &hy, "cleanB");
         int on_bnd = -1;
         if (fi_cfg.level > 0) {
-            on_bnd = target_on_boundary(op, fi_cfg);
-            run_case(op, n_steps, snap_every, fi_cfg, reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, nullptr, &snapA, rF);
+            on_bnd = fi_cfg.level == 4 ? 0 : target_on_boundary(op, fi_cfg);
+            run_case(op, n_steps, snap_every, fi_cfg, reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, nullptr, &snapA, rF, &hy, "fault");
             std::vector<real_t> Tf; host_snapshot(op, d_T, Tf);
             write_field(op, Tf, outdir, tag + "_fault");
         }
 
         // ---- trace + summary (rank 0) -----------------------------------------
-        real_t Efl_max = 0, Efa_max = 0, Efa_int = 0, Efa_final = 0, Efl_final = 0;
+        real_t Efl_max = 0, Efa_max = 0, Efa_int = 0, Efa_final = 0, Efl_final = 0, spread_at_max = 0, spread_final = 0;
         int step_max = -1, iters_delta_max = 0;
         for (size_t s = 0; s < rB.E.size(); ++s) {
             Efl_max = fmax(Efl_max, rB.E[s]); Efl_final = rB.E[s];
             if (fi_cfg.level > 0) {
                 real_t E = rF.E[s];
-                if (std::isfinite((double)E) && E > Efa_max) { Efa_max = E; step_max = rB.snap_steps[s]; }
-                Efa_final = E;
+                if (std::isfinite((double)E) && E > Efa_max) { Efa_max = E; step_max = rB.snap_steps[s]; spread_at_max = rF.spread[s]; }
+                Efa_final = E; spread_final = rF.spread[s];
                 real_t w = (s + 1 < rB.E.size()) ? (rB.snap_steps[s+1] - rB.snap_steps[s]) * dt : 0.0;
                 if (std::isfinite((double)E)) Efa_int += E * w;
             }
@@ -1088,12 +1431,22 @@ int main(int argc, char** argv) {
             char tp[600]; snprintf(tp, sizeof(tp), "%s/fi_trace_%s.csv", outdir.c_str(), tag.c_str());
             FILE* tf = fopen(tp, "w");
             if (!tf) { fprintf(stderr, "cannot write %s\n", tp); MPI_Abort(MPI_COMM_WORLD, 1); }
-            fprintf(tf, "step,t,E_noise_floor,E_fault,cg_A,cg_B,cg_F\n");
+            fprintf(tf, "step,t,E_noise_floor,E_fault,spread_F,cg_A,cg_B,cg_F,d1_abft_A,d1_abft_F,d2_resid_A,d2_resid_F,d3_tmin_F,d3_tmax_F,hyb_block_err_A,hyb_block_err_F,hyb_d4_F\n");
             for (size_t s = 0; s < rB.E.size(); ++s) {
                 int st = rB.snap_steps[s];
-                fprintf(tf, "%d,%.6e,%.10e,%.10e,%d,%d,%d\n", st, st*dt, (double)rB.E[s],
-                        fi_cfg.level > 0 ? (double)rF.E[s] : 0.0,
+                fprintf(tf, "%d,%.6e,%.10e,%.10e,%.4f,%d,%d,%d", st, st*dt, (double)rB.E[s],
+                        fi_cfg.level > 0 ? (double)rF.E[s] : 0.0, fi_cfg.level > 0 ? (double)rF.spread[s] : 0.0,
                         rA.cg_iters[st], rB.cg_iters[st], fi_cfg.level > 0 ? rF.cg_iters[st] : -1);
+                if (detect) {
+                    const RunResult& rX = fi_cfg.level > 0 ? rF : rA;
+                    fprintf(tf, ",%.3e,%.3e,%.3e,%.3e,%.6e,%.6e", (double)rA.d1_abft[st], (double)rX.d1_abft[st],
+                            (double)rA.d2_resid[st], (double)rX.d2_resid[st], (double)rX.d3_tmin[st], (double)rX.d3_tmax[st]);
+                } else fprintf(tf, ",,,,,,");
+                if (qrank_mode && rank == hy.qb.owner) {
+                    const RunResult& rX = fi_cfg.level > 0 ? rF : rA;
+                    fprintf(tf, ",%.3e,%.3e,%.3e", (double)rA.hyb_block_err[st], (double)rX.hyb_block_err[st], (double)rX.hyb_d4[st]);
+                } else fprintf(tf, ",,,");
+                fprintf(tf, "\n");
             }
             fclose(tf);
             double meanA = 0; for (int it : rA.cg_iters) meanA += it; meanA /= std::max<size_t>(1, rA.cg_iters.size());
@@ -1102,7 +1455,9 @@ int main(int argc, char** argv) {
             fprintf(sf, "tag,N,dt,n_steps,nprocs,kernel,scatter,reproject_bc,kmin,kmax,rhocmin,rhocmax,"
                         "fi_level,fi_rank,fi_step,fi_target,fi_bit,target_on_boundary,"
                         "E_floor_max,E_floor_final,E_fault_max,step_at_max,E_fault_int,E_fault_final,"
-                        "thr,iters_delta_max,mean_cg_iters_A,solve_ms_A,solve_ms_B,solve_ms_F,class\n");
+                        "thr,iters_delta_max,mean_cg_iters_A,solve_ms_A,solve_ms_B,solve_ms_F,class,spread_at_max,spread_final,"
+                        "detect,d1_first,d2_first,d3_first,d1_max_F,d2_max_F,d1_max_A,d2_max_A,detected_by,"
+                        "hybrid,hyb_block_err_max_A,hyb_block_err_max_F,d4_first_F\n");
             fprintf(sf, "%s,%d,%.3e,%d,%d,%s,%s,%d,%g,%g,%g,%g,%d,%d,%d,%ld,%d,%d,"
                         "%.6e,%.6e,%.6e,%d,%.6e,%.6e,%.3e,%d,%.2f,%.3f,%.3f,%.3f,%s\n",
                     tag.c_str(), N, (double)dt, n_steps, nprocs, kernel_fast ? "fast" : "gauss",
@@ -1112,6 +1467,30 @@ int main(int argc, char** argv) {
                     (double)Efl_max, (double)Efl_final, (double)Efa_max, step_max, (double)Efa_int,
                     (double)Efa_final, (double)thr, iters_delta_max, meanA,
                     rA.solve_ms, rB.solve_ms, rF.solve_ms, cls);
+            fprintf(sf, ",%.4f,%.4f", (double)spread_at_max, (double)spread_final);
+            {
+                const RunResult& rX = fi_cfg.level > 0 ? rF : rA;
+                std::string by;
+                if (detect) {
+                    if (rX.d1_first >= 0) by += "D1";
+                    if (rX.d2_first >= 0) by += (by.empty() ? "" : "+") + std::string("D2");
+                    if (rX.d3_first >= 0) by += (by.empty() ? "" : "+") + std::string("D3");
+                    if (by.empty()) by = "none";
+                } else by = "off";
+                fprintf(sf, ",%d,%d,%d,%d,%.3e,%.3e,%.3e,%.3e,%s", detect,
+                        rX.d1_first, rX.d2_first, rX.d3_first, (double)rX.d1_max, (double)rX.d2_max,
+                        (double)rA.d1_max, (double)rA.d2_max, by.c_str());
+                real_t hA = 0, hF = 0;
+                for (real_t v : rA.hyb_block_err) if (std::isfinite((double)v)) hA = fmax(hA, v);
+                for (real_t v : rX.hyb_block_err) if (std::isfinite((double)v)) hF = fmax(hF, v);
+                fprintf(sf, ",%d,%.3e,%.3e,%d\n", qrank_mode, (double)hA, (double)hF, rX.d4_first);
+                if (qrank_mode)
+                    printf("hybrid       block err max clean %.3e  fault %.3e   D4 first %d\n", (double)hA, (double)hF, rX.d4_first);
+                if (detect)
+                    printf("detectors    D1 first %d (max %.2e)  D2 first %d (max %.2e)  D3 first %d  -> %s   [clean A: D1 %.2e D2 %.2e]\n",
+                           rX.d1_first, (double)rX.d1_max, rX.d2_first, (double)rX.d2_max, rX.d3_first, by.c_str(),
+                           (double)rA.d1_max, (double)rA.d2_max);
+            }
             fclose(sf);
             printf("\n=== Done (%s) ===\n", tag.c_str());
             printf("solve wall A/B/F (ms): %.1f / %.1f / %.1f   mean CG iters A: %.2f\n",
@@ -1130,6 +1509,7 @@ int main(int argc, char** argv) {
     }
 
     cudaFree(d_T); cudaFree(d_b); cudaFree(d_r); cudaFree(d_z); cudaFree(d_p); cudaFree(d_Ap);
+    if (hy.d_buf) cudaFree(hy.d_buf);
     op.cleanup();
     MPI_Finalize();
     return 0;

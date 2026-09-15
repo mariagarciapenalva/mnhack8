@@ -1,0 +1,2 @@
+tag,N,dt,n_steps,nprocs,kernel,scatter,reproject_bc,kmin,kmax,rhocmin,rhocmax,fi_level,fi_rank,fi_step,fi_target,fi_bit,target_on_boundary,E_floor_max,E_floor_final,E_fault_max,step_at_max,E_fault_int,E_fault_final,thr,iters_delta_max,mean_cg_iters_A,solve_ms_A,solve_ms_B,solve_ms_F,class
+nf,32,5.000e-04,40,1,fast,atomic,0,0.0209528,22.1538,1,1,0,0,-1,0,0,-1,2.646083e-16,2.646083e-16,0.000000e+00,-1,0.000000e+00,0.000000e+00,1.000e-13,0,32.23,1232.615,1208.737,0.000,clean

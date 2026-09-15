@@ -1,0 +1,14 @@
+{
+  "test": "v5",
+  "pass": true,
+  "details": {
+    "field_rel_diff": 9.85343539564711e-16,
+    "solve_ms_gauss": 1576.661,
+    "solve_ms_fast": 833.57,
+    "speedup": 1.8914560264884772,
+    "mean_cg_iters": {
+      "gauss": 18.32,
+      "fast": 18.32
+    }
+  }
+}

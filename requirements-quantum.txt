@@ -1,0 +1,9 @@
+# Layer 6-8 Python stack. Pin exactly on MN5 (qiskit-algorithms has broken VarQITE across minor versions).
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+qiskit==1.4.6
+qiskit-aer==0.17.2
+qiskit-algorithms==0.4.0
+mpi4py>=3.1
+# on MN5 ACC, if available:  qiskit-aer-gpu==0.17.2   (cuStateVec / cuQuantum backend)
