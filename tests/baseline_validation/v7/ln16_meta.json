@@ -1,0 +1,22 @@
+{
+  "n": 16,
+  "model": "lognormal",
+  "out": "tests/baseline_validation/v7/ln16",
+  "k": 1.0,
+  "k2": 100.0,
+  "period": 4,
+  "rhoc": 1.0,
+  "mu": 0.0,
+  "sigma": 1.0,
+  "rhoc_sigma": 0.0,
+  "L": 0.125,
+  "upscale": 1,
+  "seed": 7,
+  "L_over_h": 2.0,
+  "kmin": 0.04161003424721647,
+  "kmax": 36.762653570232324,
+  "contrast": 883.5045256587739,
+  "rhocmin": 1.0,
+  "rhocmax": 1.0,
+  "n_elements": 4096
+}

@@ -1,0 +1,7 @@
+N 16
+nprocs 1
+dt 0.0005
+n_steps 40
+field tests/baseline_validation/v7/ln16
+kernel gauss
+scatter colored

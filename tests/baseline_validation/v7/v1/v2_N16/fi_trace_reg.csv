@@ -1,0 +1,2 @@
+step,t,E_noise_floor,E_fault,spread_F,cg_A,cg_B,cg_F,d1_abft_A,d1_abft_F,d2_resid_A,d2_resid_F,d3_tmin_F,d3_tmax_F,hyb_block_err_A,hyb_block_err_F,hyb_d4_F
+99,9.900000e-03,7.9442610781e-17,0.0000000000e+00,0.0000,1,1,-1,,,,,,,,,
