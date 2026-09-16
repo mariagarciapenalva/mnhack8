@@ -1,0 +1,7 @@
+N 32
+nprocs 1
+dt 0.0005
+n_steps 40
+field tests/baseline_validation/v6/v2/ln32
+kernel fast
+scatter atomic

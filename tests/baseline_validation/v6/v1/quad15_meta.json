@@ -1,0 +1,21 @@
+{
+  "n": 15,
+  "model": "quadrants",
+  "out": "tests/baseline_validation/v6/v1/quad15",
+  "k": 1.0,
+  "k2": 100.0,
+  "period": 4,
+  "rhoc": 1.0,
+  "mu": 0.0,
+  "sigma": 1.0,
+  "rhoc_sigma": 0.0,
+  "L": 0.125,
+  "upscale": 1,
+  "seed": 1,
+  "kmin": 100.0,
+  "kmax": 400.0,
+  "contrast": 4.0,
+  "rhocmin": 1.0,
+  "rhocmax": 1.25,
+  "n_elements": 3375
+}
