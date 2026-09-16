@@ -2,7 +2,7 @@
 """
 gen_field.py -- per-element material fields for heat_solver_het.cu.
 
-Element ordering (MUST match the solver):  e = ix*ny*nz + iy*nz + iz,
+Element ordering (matching the solver):  e = ix*ny*nz + iy*nz + iz,
 ix slowest, iz fastest, for a cubic grid nx = ny = nz = n.
 
 Models

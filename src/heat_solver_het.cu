@@ -1,5 +1,5 @@
 // =============================================================================
-// heat_solver_het.cu  --  v2, validated-baseline candidate (September 2026)
+// heat_solver_het.cu  -- (September 2026)
 //
 // Copyright 2026 Maria Garcia Penalva
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -69,7 +69,7 @@
 //     detected   : a non-finite value was observed
 //   thr = max(--thr, 10 * E_floor_max). With --scatter colored, E_floor == 0.
 //
-// STARTUP SELF-CHECK: M_hat and K_hat are compared with their closed forms
+// M_hat and K_hat are compared with their closed forms
 //   (M: V/216*{8,4,2,1} by node distance, sum = V; K: zero row sums, diagonal
 //   (1/9) sum_i h_j h_k / h_i). Any mismatch > 1e-12 aborts the run.
 //
@@ -111,7 +111,7 @@ static MPI_Comm SOLVER_COMM;
 } while (0)
 
 // -----------------------------------------------------------------------------
-// Grid descriptor (passed by value to kernels)
+// Grid descriptor 
 // -----------------------------------------------------------------------------
 struct Grid {
     int  nx, ny, nz;

@@ -5,8 +5,7 @@ V2 -- Noise floor: the distribution of clean-vs-clean divergence.
 REQUIREMENT SOURCE
   The benign/SDC decision compares a faulted run against the reference run.
   Two clean runs already differ in atomic mode (floating-point atomicAdd is
-  order-nondeterministic). A threshold set from ONE clean-vs-clean pair (the
-  original 10x rule) has no statistical basis; a reviewer will ask "why 10".
+  order-nondeterministic).
   This test measures the distribution of the floor and, for colored mode,
   proves that the floor is identically zero, which removes the threshold
   problem from the methodology entirely.
