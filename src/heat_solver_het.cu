@@ -929,7 +929,7 @@ public:
 // Matrix-free PCG
 // =============================================================================
 int pcg_solve(HeatOperator& op, const real_t* d_b, real_t* d_x, int max_iter, real_t tol,
-              real_t* d_r, real_t* d_z, real_t* d_p, real_t* d_Ap) {
+              real_t* d_r, real_t* d_z, real_t* d_p, real_t* d_Ap, FILE* diag_log = nullptr) {
     long n = op.g.nnodes_local; int tn = op.threads_node; long bn = op.blocks_node;
     (void)tn; (void)bn;
     op.apply_matvec(d_x, d_Ap);                       // level R fires here if armed
@@ -937,6 +937,7 @@ int pcg_solve(HeatOperator& op, const real_t* d_b, real_t* d_x, int max_iter, re
     axpy_kernel<<<bn, tn>>>(-1.0, d_Ap, d_r, n); CUDA_CHECK_LAUNCH();
     real_t bnorm = op.norm2(d_b);
     if (bnorm < 1e-30) bnorm = 1.0;
+    if (diag_log) fprintf(diag_log, "0,%.10e,,\n", (double)(op.norm2(d_r) / bnorm));
     op.apply_preconditioner(d_r, d_z);
     copy_kernel<<<bn, tn>>>(d_z, d_p, n); CUDA_CHECK_LAUNCH();
     real_t rho = op.dot(d_r, d_z);
@@ -949,12 +950,20 @@ int pcg_solve(HeatOperator& op, const real_t* d_b, real_t* d_x, int max_iter, re
         axpy_kernel<<<bn, tn>>>( alpha, d_p,  d_x, n); CUDA_CHECK_LAUNCH();
         axpy_kernel<<<bn, tn>>>(-alpha, d_Ap, d_r, n); CUDA_CHECK_LAUNCH();
         real_t rnorm = op.norm2(d_r);
-        if (rnorm / bnorm < tol) { iter++; break; }
-        op.apply_preconditioner(d_r, d_z);
-        real_t rho_new = op.dot(d_r, d_z);
-        real_t beta = rho_new / rho;
-        aypx_kernel<<<bn, tn>>>(beta, d_z, d_p, n); CUDA_CHECK_LAUNCH();
-        rho = rho_new;
+        bool conv = (rnorm / bnorm < tol);
+        real_t beta = 0.0;
+        if (!conv) {
+            op.apply_preconditioner(d_r, d_z);
+            real_t rho_new = op.dot(d_r, d_z);
+            beta = rho_new / rho;
+            aypx_kernel<<<bn, tn>>>(beta, d_z, d_p, n); CUDA_CHECK_LAUNCH();
+            rho = rho_new;
+        }
+        // beta is 0 (harmless placeholder) on the final, converged iteration --
+        // that row is dropped in post-processing since it never feeds a p-update.
+        if (diag_log) fprintf(diag_log, "%d,%.10e,%.10e,%.10e\n", iter + 1, (double)(rnorm / bnorm),
+                              (double)alpha, (double)beta);
+        if (conv) { iter++; break; }
     }
     return iter;
 }
@@ -1028,7 +1037,8 @@ static void run_case(HeatOperator& op, int n_steps, int snap_every, FIConfig fi_
                      real_t* d_T, real_t* d_b, real_t* d_r, real_t* d_z, real_t* d_p, real_t* d_Ap,
                      std::vector<std::vector<real_t>>* keep_snaps,
                      const std::vector<std::vector<real_t>>* ref,
-                     RunResult& res, HybridCtx* hy = nullptr, const char* case_tag = "") {
+                     RunResult& res, HybridCtx* hy = nullptr, const char* case_tag = "",
+                     const RunResult* d3_ref = nullptr) {
     long n = op.g.nnodes_local;
     CUDA_CHECK(cudaMemset(d_T, 0, n * sizeof(real_t)));
     if (op.g.ic_mode == 1) { gaussian_ic_kernel<<<op.blocks_node, op.threads_node>>>(d_T, op.g); CUDA_CHECK_LAUNCH(); }
@@ -1121,13 +1131,21 @@ static void run_case(HeatOperator& op, int n_steps, int snap_every, FIConfig fi_
             axpy_kernel<<<op.blocks_node, op.threads_node>>>(-1.0, d_Ap, d_r, n); CUDA_CHECK_LAUNCH();
             real_t bn = op.norm2(d_b); if (bn < 1e-300) bn = 1.0;
             real_t d2 = op.norm2(d_r) / bn;
-            // D3: maximum-principle range
+            // D3: maximum-principle range. A hand-derived theoretical growth bound was
+            // used originally and produces false positives at every step: consistent-
+            // mass Galerkin FEM (as used here) does NOT rigorously satisfy a discrete
+            // maximum principle near a sharp source -- a well-known FEM fact, missed in
+            // the original design. Fixed the same way Layer 3's noise floor was fixed:
+            // calibrate against the CLEAN reference run's own trajectory at the same
+            // step, not an assumed formula. d3_ref is null only for the reference run
+            // itself (cleanA), which by definition has nothing to compare against.
             real_t tmin, tmax; op.minmax(d_T, tmin, tmax);
-            real_t prev_max = res.d3_tmax.empty() ? 0.0 : res.d3_tmax.back();
-            real_t growth_bound = prev_max + 2.0 * op.dt * (op.g.verify ? 0.0 : SOURCE_QMAX) / op.rhocmin
-                                  + 1e-8 * (fabs(prev_max) + 1e-300);
-            bool d3_fire = !(tmin >= -1e-6 * (fabs(prev_max) + 1e-300)) || !(tmax <= growth_bound)
-                           || !std::isfinite((double)tmin) || !std::isfinite((double)tmax);
+            bool d3_fire = !std::isfinite((double)tmin) || !std::isfinite((double)tmax);
+            if (d3_ref && step < (int)d3_ref->d3_tmax.size()) {
+                real_t ref_max = d3_ref->d3_tmax[step], ref_min = d3_ref->d3_tmin[step];
+                real_t margin = 1e-6 * fmax(fabs(ref_max), 1e-300) + 1e-12;
+                if (tmax > ref_max + margin || tmin < ref_min - margin) d3_fire = true;
+            }
             res.d1_abft.push_back(d1); res.d2_resid.push_back(d2);
             res.d3_tmin.push_back(tmin); res.d3_tmax.push_back(tmax);
             if (!(d1 <= op.chk_tol) && res.d1_first < 0) res.d1_first = step;
@@ -1247,6 +1265,7 @@ static void usage(const char* prog) {
       "   [--fi LEVEL STEP TARGET BIT] [--fi-rank R] [--snap S] [--tag NAME]\n"
       "   [--kernel gauss|fast] [--scatter atomic|colored] [--thr X]\n"
       "   [--reproject-bc] [--detect] [--verify] [--no-source] [--ic zero|gaussian] [--dump-snaps]\n"
+      "   [--diag-cg FILE]   (one CG solve, logs iteration,rel_residual to FILE, then exits)\n"
       "   [--qrank --qblock X0 Y0 Z0 m]   (hybrid: last world rank = scripts/quantum/qrank.py)\n"
       "  LEVEL: 1=G global memory, 2=R accumulator, 3=H halo staging buffer\n"
       "  BIT:   0-51 mantissa, 52-62 exponent, 63 sign\n", prog);
@@ -1289,6 +1308,7 @@ int main(int argc, char** argv) {
     FIConfig fi_cfg;
     int snap_every = 5, verify_mode = 0, kernel_fast = 1, colored = 0, reproject = 0, detect = 0;
     int no_source = 0, ic_mode = 0, dump_snaps = 0;
+    std::string diag_cg_path;
     QBlock qb;
     real_t thr_user = 1e-13;
     for (int i = 5; i < argc; ++i) {
@@ -1303,6 +1323,7 @@ int main(int argc, char** argv) {
         } else if (!strcmp(argv[i], "--scatter") && i + 1 < argc) { colored = !strcmp(argv[++i], "colored");
         } else if (!strcmp(argv[i], "--reproject-bc")) { reproject = 1;
         } else if (!strcmp(argv[i], "--detect"))       { detect = 1;
+        } else if (!strcmp(argv[i], "--diag-cg") && i + 1 < argc) { diag_cg_path = argv[++i];
         } else if (!strcmp(argv[i], "--no-source"))    { no_source = 1;
         } else if (!strcmp(argv[i], "--dump-snaps"))   { dump_snaps = 1;
         } else if (!strcmp(argv[i], "--qrank"))        { /* pre-scanned */
@@ -1389,17 +1410,31 @@ int main(int argc, char** argv) {
 
     if (verify_mode) {
         run_verify(op, n_steps, dt, outdir, d_T, d_b, d_r, d_z, d_p, d_Ap);
+    } else if (!diag_cg_path.empty()) {
+        // One CG solve, one time step, from T=0, no fault/detect/hybrid machinery.
+        // Logs iteration,relative_residual to CSV -- purely diagnostic.
+        FILE* lf = fopen(diag_cg_path.c_str(), "w");
+        if (!lf) { fprintf(stderr, "cannot write %s\n", diag_cg_path.c_str()); MPI_Abort(MPI_COMM_WORLD, 1); }
+        fprintf(lf, "iter,rel_residual,alpha,beta\n");
+        CUDA_CHECK(cudaMemset(d_T, 0, n * sizeof(real_t)));
+        if (ic_mode == 1) { gaussian_ic_kernel<<<op.blocks_node, op.threads_node>>>(d_T, op.g); CUDA_CHECK_LAUNCH(); }
+        op.build_rhs(d_T, d_b);
+        int it = pcg_solve(op, d_b, d_T, 500, 1e-8, d_r, d_z, d_p, d_Ap, lf);
+        fclose(lf);
+        if (rank == 0)
+            printf("diag-cg: %d iterations to 1e-8, contrast k_max/k_min=%.3g -> %s\n",
+                   it, (double)(op.kmax / op.kmin), diag_cg_path.c_str());
     } else {
         // ---- twin-run protocol ---------------------------------------------
         std::vector<std::vector<real_t>> snapA;
         RunResult rA, rB, rF;
         run_case(op, n_steps, snap_every, FIConfig(), reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, &snapA, nullptr, rA, &hy, "cleanA");
         write_field(op, snapA.back(), outdir, tag + "_clean");
-        run_case(op, n_steps, snap_every, FIConfig(), reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, nullptr, &snapA, rB, &hy, "cleanB");
+        run_case(op, n_steps, snap_every, FIConfig(), reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, nullptr, &snapA, rB, &hy, "cleanB", &rA);
         int on_bnd = -1;
         if (fi_cfg.level > 0) {
             on_bnd = fi_cfg.level == 4 ? 0 : target_on_boundary(op, fi_cfg);
-            run_case(op, n_steps, snap_every, fi_cfg, reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, nullptr, &snapA, rF, &hy, "fault");
+            run_case(op, n_steps, snap_every, fi_cfg, reproject, d_T, d_b, d_r, d_z, d_p, d_Ap, nullptr, &snapA, rF, &hy, "fault", &rA);
             std::vector<real_t> Tf; host_snapshot(op, d_T, Tf);
             write_field(op, Tf, outdir, tag + "_fault");
         }

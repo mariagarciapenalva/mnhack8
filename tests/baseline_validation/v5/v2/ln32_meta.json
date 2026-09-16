@@ -1,0 +1,22 @@
+{
+  "n": 32,
+  "model": "lognormal",
+  "out": "tests/baseline_validation/v5/v2/ln32",
+  "k": 1.0,
+  "k2": 100.0,
+  "period": 4,
+  "rhoc": 1.0,
+  "mu": 0.0,
+  "sigma": 1.0,
+  "rhoc_sigma": 0.0,
+  "L": 0.125,
+  "upscale": 1,
+  "seed": 7,
+  "L_over_h": 4.0,
+  "kmin": 0.02095277986074454,
+  "kmax": 22.153757807186913,
+  "contrast": 1057.3183107169675,
+  "rhocmin": 1.0,
+  "rhocmax": 1.0,
+  "n_elements": 32768
+}

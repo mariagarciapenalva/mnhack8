@@ -1,0 +1,2 @@
+N,dt,t_end,nprocs,kernel,scatter,rel_L2_err,solve_ms,avg_cg_iters
+16,1.000000e-04,2.000000e-02,2,fast,colored,1.0238442814e-03,1649.045,1.000

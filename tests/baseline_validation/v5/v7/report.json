@@ -1,0 +1,25 @@
+{
+  "test": "v7",
+  "pass": true,
+  "details": {
+    "laplacian_selftest": "laplacian.py self-tests OK",
+    "tier1_1D_m6_relerr": 1.3803320850211276e-15,
+    "tier1_3D_m3_relerr": 8.794968458363956e-15,
+    "lifting_norm": 0.0,
+    "flip62_value": 3.512323795189081e+307,
+    "tier2": {
+      "0.002": {
+        "relerr": 0.011483084700904617,
+        "norm_err": 0.002144464301943994,
+        "encode_infid": 3.0242475190789264e-13
+      },
+      "0.001": {
+        "relerr": 0.00556329748293768,
+        "norm_err": 0.0011504641946511638,
+        "encode_infid": 3.0242475190789264e-13
+      }
+    },
+    "tier2_params": 12,
+    "tier2_seconds": 7.228101491928101
+  }
+}
