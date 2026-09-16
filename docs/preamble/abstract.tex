@@ -1,5 +1,0 @@
-% abstract
-\begin{abstract}
-Hardware ECC on modern GPUs protects DRAM but leaves registers, cache, shared memory, and in-transit data uncovered, creating a real and largely uncharacterized risk of silent data corruption from radiation-induced Single Event Upsets (SEUs). This project characterizes how such faults propagate differently through a classical GPU-accelerated finite element solver versus a GPU-simulated quantum statevector evolution of the same underlying PDE, using a scale-matched comparison to avoid the invalid move of comparing systems of mismatched size. A separate classical-only scaling study on MareNostrum 5 establishes how propagation behavior changes with problem scale, and a hybrid-pipeline study characterizes which classical-quantum data handoff points are least protected by existing fault-tolerance mechanisms -- a gap explicitly left open by existing formal fault-tolerance frameworks for hybrid scientific workflows.
-\end{abstract}
-
