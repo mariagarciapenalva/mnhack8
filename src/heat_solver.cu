@@ -3,9 +3,7 @@
 //
 // Assembly-free FEM solver for the transient heat equation in 3D heterogeneous
 // materials. Backward Euler time stepping. Matrix-free Jacobi-preconditioned
-// conjugate gradient. 1D MPI domain decomposition along the x-axis. Designed
-// for integration with the GlaSs library (the matvec and preconditioner are
-// exposed as clean callable methods on HeatOperator).
+// conjugate gradient. 1D MPI domain decomposition along the x-axis.
 //
 // Built on the MNHack7 prototype by María García Penalva, with corrections
 // and extensions per code review (May 2026).
@@ -50,7 +48,7 @@ typedef double real_t;
 } while (0)
 
 // -----------------------------------------------------------------------------
-// Grid descriptor (passed by value to kernels)
+// Grid 
 // -----------------------------------------------------------------------------
 struct Grid {
     int  nx, ny, nz;          // global cells in each direction
@@ -71,9 +69,7 @@ long lnid(int ix_local, int iy, int iz, const Grid& g) {
     return (long)ix_local * (g.nny * g.nnz) + (long)iy * g.nnz + iz;
 }
 
-// Compute physical coordinates of a node from local indices.
-// Coordinates are NOT stored in memory anymore (was an O(N) memory bug source);
-// they are recomputed cheaply from indices.
+// Compute physical coordinates of a node from local indices. Not stored (O(N) bug); recomputed from indices.
 __host__ __device__ __forceinline__
 void node_coords(int ix_local, int iy, int iz, const Grid& g,
                  real_t& x, real_t& y, real_t& z) {
@@ -90,7 +86,7 @@ bool is_boundary(int ix_local, int iy, int iz, const Grid& g) {
             iz == 0 || iz == g.nz);
 }
 
-// Owner convention for shared nodes:
+// Convention for shared nodes:
 //   rank r owns ix_local in [0, nx_local), and (only on the last rank)
 //   also owns ix_local == nx_local. Used for non-double-counting in dot products.
 __host__ __device__ __forceinline__
@@ -451,7 +447,7 @@ void unpack_face_add_kernel(real_t* v, const real_t* buf, Grid g, int x_local) {
 
 // =============================================================================
 // HeatOperator: encapsulates the (M + dt*K) operator and provides the matvec
-// and preconditioner callbacks for an external CG solver (e.g. GlaSs).
+// and preconditioner callbacks for an external CG solver (lib implementation).
 // =============================================================================
 class HeatOperator {
 public:
@@ -582,7 +578,7 @@ public:
         CUDA_CHECK_LAUNCH();
     }
 
-    // ---- Public API for an external CG (GlaSs) -----------------------------
+    // ---- Public API for an external CG -----------------------------
 
     // y = A*x  with halo sum + Dirichlet projection
     void apply_matvec(const real_t* d_x, real_t* d_y) {
@@ -636,9 +632,7 @@ public:
 
 // =============================================================================
 // Matrix-free Preconditioned CG
-// (Replace this with a call into GlaSs::pcg() once the library is wired in.
-//  GlaSs needs callbacks; HeatOperator::apply_matvec and apply_preconditioner
-//  are the natural entry points.)
+// (Replaceable by external library in pcg())
 // =============================================================================
 int pcg_solve(HeatOperator& op,
               const real_t* d_b, real_t* d_x,
