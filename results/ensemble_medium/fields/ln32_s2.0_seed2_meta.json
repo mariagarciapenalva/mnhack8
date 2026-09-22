@@ -1,0 +1,26 @@
+{
+  "n": 32,
+  "model": "lognormal",
+  "out": "results/ensemble_medium/fields/ln32_s2.0_seed2",
+  "k": 1.0,
+  "k2": 100.0,
+  "period": 4,
+  "rhoc": 1.0,
+  "mu": 0.0,
+  "sigma": 2.0,
+  "rhoc_sigma": 0.0,
+  "L": 0.125,
+  "upscale": 2,
+  "seed": 2,
+  "upscale_rule": {
+    "k": "harmonic",
+    "rhoc": "arithmetic"
+  },
+  "L_over_h": 4.0,
+  "kmin": 0.0005449123884837821,
+  "kmax": 2827.037567436681,
+  "contrast": 5188058.901180259,
+  "rhocmin": 1.0,
+  "rhocmax": 1.0,
+  "n_elements": 32768
+}

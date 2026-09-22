@@ -1,0 +1,7 @@
+N 32
+nprocs 2
+dt 0.0005
+n_steps 40
+field results/ensemble_medium/fields/ln32_s2.0_seed2
+kernel fast
+scatter colored

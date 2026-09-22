@@ -1,0 +1,16 @@
+level,bit,cls,by,d1_first,d2_first,d3_first,E_max,iters_delta
+G,30,persistent,none,-1,-1,-1,1.318149e-09,0
+G,51,persistent,D3,-1,-1,10,0.002764359,0
+G,55,persistent,D3,-1,-1,10,1.467582,1
+G,62,persistent,none,-1,-1,-1,0.005755222,0
+G,63,persistent,none,-1,-1,-1,0.01151044,0
+R,30,persistent,none,-1,-1,-1,1.864681e-10,0
+R,51,persistent,D1+D2+D3,10,10,10,0.0003910519,0
+R,55,persistent,D1+D2+D3,10,10,10,0.001290674,0
+R,62,detected,D1+D2,10,10,-1,0.0,469
+R,63,persistent,D1+D2+D3,10,10,10,0.00259147,0
+H,30,persistent,D1,10,-1,-1,2.71954e-08,0
+H,51,persistent,D1+D2+D3,10,10,10,6968.355,467
+H,55,persistent,D1+D2+D3,10,10,10,9555661000.0,467
+H,62,detected,D1+D2,10,10,-1,0.0,469
+H,63,persistent,D1+D2+D3,10,10,10,32085.43,467

@@ -1,0 +1,21 @@
+{
+  "n": 16,
+  "model": "homogeneous",
+  "out": "tests/baseline_validation/v10/v0_fast_atomic_np1/fields/homog16",
+  "k": 1.0,
+  "k2": 100.0,
+  "period": 4,
+  "rhoc": 1.0,
+  "mu": 0.0,
+  "sigma": 1.0,
+  "rhoc_sigma": 0.0,
+  "L": 0.125,
+  "upscale": 1,
+  "seed": 1,
+  "kmin": 1.0,
+  "kmax": 1.0,
+  "contrast": 1.0,
+  "rhocmin": 1.0,
+  "rhocmax": 1.0,
+  "n_elements": 4096
+}
