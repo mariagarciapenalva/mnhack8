@@ -24,7 +24,7 @@ Tier 1  ExactStatevector : exp(-dt H) applied through the exact eigen-expansion
                            more with CuPy). Ground truth on the quantum
                            representation. No ansatz, no variational error.
 Tier 2  AerVarQITE       : RealAmplitudes ansatz, McLachlan variational principle
-                           (qiskit_algorithms.VarQITE), Aer Estimator. theta is
+                           (qiskit_algorithms.VarQITE), Aer EstimatorV2. theta is
                            the classical float vector of the hybrid loop.
                            decode='exact' reads the statevector; decode='shots'
                            estimates |a_j|^2 from counts and takes signs from the
@@ -155,12 +155,12 @@ class AerVarQITE(QuantumStep):
     def step(self, p, dtau):
         from qiskit_algorithms import VarQITE, TimeEvolutionProblem
         from qiskit_algorithms.time_evolvers.variational import ImaginaryMcLachlanPrinciple
-        from qiskit_aer.primitives import Estimator
+        from qiskit_aer.primitives import EstimatorV2
         theta = p.vec.copy(); meta = dict(p.meta)
         for q in meta.pop('pending_x', []):            # hardware X: re-fit X|psi>
             s = self._state(theta); j = np.arange(s.size); theta, _ = self.fit(s[j ^ (1 << q)])
         E0 = self._energy(theta)
-        est = Estimator(run_options={'shots': None}, approximation=True)
+        est = EstimatorV2(options={"default_precision": 0.0})
         vq = VarQITE(self.ansatz, theta, ImaginaryMcLachlanPrinciple(), est, num_timesteps=1)
         res = vq.evolve(TimeEvolutionProblem(self.H, dtau))
         theta1 = np.array(res.parameter_values[-1], float)
