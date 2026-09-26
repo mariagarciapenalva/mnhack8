@@ -63,6 +63,9 @@ env/
 *.snm
 *.vrb
 
+# Python virtual environment
+mnhack8-env/
+
 # ===== Project-specific data policy =====
 # Field-generator binary output (regenerable from seed — see docs/appendices/materials.tex)
 *.bin
