@@ -44,7 +44,7 @@ typedef double real_t;
 
 #define CUDA_CHECK_LAUNCH() do {                                               \
     CUDA_CHECK(cudaPeekAtLastError());                                         \
-    CUDA_CHECK(cudaDeviceSynchronize());                                       \
+    /* CUDA_CHECK(cudaDeviceSynchronize()); */                                 \
 } while (0)
 
 // -----------------------------------------------------------------------------

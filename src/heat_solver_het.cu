@@ -107,7 +107,7 @@ static MPI_Comm SOLVER_COMM;
 
 #define CUDA_CHECK_LAUNCH() do {                                               \
     CUDA_CHECK(cudaPeekAtLastError());                                         \
-    CUDA_CHECK(cudaDeviceSynchronize());                                       \
+    /* CUDA_CHECK(cudaDeviceSynchronize()); */                                 \
 } while (0)
 
 // Same launch-error check, without the device-wide synchronize. Everything in
