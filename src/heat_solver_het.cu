@@ -435,11 +435,11 @@ __global__ void apply_dirichlet_value_kernel(real_t* v, Grid g, real_t val) {
     if (is_boundary(ix_local, iy, iz, g)) v[n] = val;
 }
 
-__global__ void axpy_kernel(real_t a, const real_t* x, real_t* y, long n) {
+__global__ void axpy_kernel(real_t* a, const real_t* x, real_t* y, long n) {
     long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) y[i] += a * x[i];
 }
-__global__ void aypx_kernel(real_t a, const real_t* x, real_t* y, long n) {
+__global__ void aypx_kernel(real_t* a, const real_t* x, real_t* y, long n) {
     long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) y[i] = x[i] + a * y[i];
 }
@@ -507,12 +507,12 @@ void owned_dot_atomic_kernel(const real_t* x, const real_t* y,
     }
     sdata[tid] = v;
     __syncthreads();
-    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
-        if (tid < st) sdata[tid] += sdata[tid + st];
-        __syncthreads();
-    }
+    //for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    //  if (tid < st) sdata[tid] += sdata[tid + st];
+    //  __syncthreads();
+    //}
     if (tid == 0) atomicAdd(s, sdata[0]);
-    if (blockIdx.x == 0 && tid == 0) *s_next = 0.0;   // arm the other buffer
+    //if (blockIdx.x == 0 && tid == 0) *s_next = 0.0;   // arm the other buffer
 }
 
 struct DotAtomic {
@@ -535,19 +535,19 @@ struct DotAtomic {
     real_t* dev(const real_t* d_x, const real_t* d_y, const Grid& g, long blocks, int threads) {
         real_t* s = d_s[cur]; real_t* s_next = d_s[cur ^ 1];
         owned_dot_atomic_kernel<<<blocks, threads, threads * sizeof(real_t)>>>(d_x, d_y, s, s_next, g);
-        CUDA_CHECK_LAUNCH_ASYNC();
+        //CUDA_CHECK_LAUNCH_ASYNC();
         cur ^= 1;
         return s;
     }
 
     // Host readback (by value) + global sum over ranks.
-    real_t value(const real_t* s) {
-        CUDA_CHECK(cudaMemcpyAsync(h_s, s, sizeof(real_t), cudaMemcpyDeviceToHost, 0));
-        CUDA_CHECK(cudaStreamSynchronize(0));
-        real_t local = *h_s, global;
-        MPI_Allreduce(&local, &global, 1, MPI_REAL_T, MPI_SUM, SOLVER_COMM);
-        return global;
-    }
+    //real_t value(const real_t* s) {
+    //  CUDA_CHECK(cudaMemcpyAsync(h_s, s, sizeof(real_t), cudaMemcpyDeviceToHost, 0));
+    //  CUDA_CHECK(cudaStreamSynchronize(0));
+    //  real_t local = *h_s, global;
+    //  MPI_Allreduce(&local, &global, 1, MPI_REAL_T, MPI_SUM, SOLVER_COMM);
+    //  return global;
+    //}
 
     real_t dot(const real_t* d_x, const real_t* d_y, const Grid& g, long blocks, int threads) {
         return value(dev(d_x, d_y, g, blocks, threads));
