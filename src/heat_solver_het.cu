@@ -90,6 +90,7 @@
 #include <cstdint>
 #include <nvtx3/nvToolsExt.h>
 
+
 typedef double real_t;
 #define MPI_REAL_T MPI_DOUBLE
 
@@ -117,11 +118,12 @@ inline constexpr int num_colors = sizeof(colors) / sizeof(uint32_t);
 
 // category ids for PUSH_RANGE
 enum { CAT_SETUP, CAT_TIMESTEP, CAT_BUILD_RHS, CAT_CG, CAT_MATVEC,
-    CAT_HALO, CAT_DOT, CAT_SNAPSHOT, CAT_HYBRID, CAT_MINMAX };
+    CAT_HALO, CAT_DOT, CAT_SNAPSHOT, CAT_HYBRID, CAT_MINMAX, CAT_NORM };
 // All solver-internal communication goes through SOLVER_COMM. Without --qrank
 // it is SOLVER_COMM; with --qrank the last world rank is a Python quantum
 // rank (scripts/quantum/qrank.py) and SOLVER_COMM is the split of the rest.
 static MPI_Comm SOLVER_COMM;
+
 
 #define CUDA_CHECK(call) do {                                                  \
     cudaError_t _e = (call);                                                   \
@@ -150,7 +152,7 @@ static MPI_Comm SOLVER_COMM;
 } while (0)
 
 // -----------------------------------------------------------------------------
-// Grid descriptor
+// Grid descriptor 
 // -----------------------------------------------------------------------------
 struct Grid {
     int  nx, ny, nz;
@@ -174,7 +176,7 @@ struct FIConfig {
     int  step   = -1;
     long target = 0;
     int  bit    = 0;    // 0-51 mantissa, 52-62 exponent, 63 sign
-    int  rank   = 0;    // the one rank that fires
+    int  rank   = 0;    // the ONE rank that fires
     int  armed  = 0;
 };
 
@@ -188,7 +190,7 @@ __global__ void flip_bit_global_kernel(real_t* v, long idx, int bit) {
 // -----------------------------------------------------------------------------
 // Reference element matrices (element congruency). Filled once at setup.
 // -----------------------------------------------------------------------------
-__constant__ real_t c_Mhat[64]; //check why 64
+__constant__ real_t c_Mhat[64];
 __constant__ real_t c_Khat[64];
 
 // Peak volumetric source. Named because the Layer-4 range monitor (D3) uses
@@ -206,7 +208,7 @@ long lnid(int ix_local, int iy, int iz, const Grid& g) {
 
 __host__ __device__ __forceinline__
 void node_coords(int ix_local, int iy, int iz, const Grid& g,
-                real_t& x, real_t& y, real_t& z) {
+                 real_t& x, real_t& y, real_t& z) {
     x = (real_t)(g.ix_start + ix_local) * g.hx;
     y = (real_t)iy * g.hy;
     z = (real_t)iz * g.hz;
@@ -241,7 +243,7 @@ real_t source_at(real_t x, real_t y, real_t z, const Grid& g) {
 //   N4:(-1,-1,+1) N5:(+1,-1,+1) N6:(+1,+1,+1) N7:(-1,+1,+1)
 __host__ __device__ __forceinline__
 void shape_func_grad(real_t xi, real_t eta, real_t zeta,
-                    real_t N[8], real_t dN[8][3]) {
+                     real_t N[8], real_t dN[8][3]) {
     const int sgn[8][3] = {
         {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},
         {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1}
@@ -282,7 +284,7 @@ long color_count(int color, const Grid& g) {
 
 __device__ __forceinline__
 bool resolve_element(long tid, int color, const Grid& g,
-                    long& e, int& ix_e, int& iy_e, int& iz_e) {
+                     long& e, int& ix_e, int& iy_e, int& iz_e) {
     if (color < 0) {
         if (tid >= g.ne_local) return false;
         e = tid;
@@ -309,7 +311,7 @@ bool resolve_element(long tid, int color, const Grid& g,
 // -----------------------------------------------------------------------------
 __device__ __forceinline__
 void elem_apply_gauss(const real_t xe[8], real_t ye[8],
-                    real_t k_e, real_t rhoc_e, real_t dt, const Grid& g) {
+                      real_t k_e, real_t rhoc_e, real_t dt, const Grid& g) {
     const real_t det_J  = g.hx * g.hy * g.hz / 8.0;
     const real_t inv_Jx = 2.0 / g.hx, inv_Jy = 2.0 / g.hy, inv_Jz = 2.0 / g.hz;
     const real_t gp = 1.0 / 1.7320508075688772;
@@ -339,7 +341,7 @@ void elem_apply_gauss(const real_t xe[8], real_t ye[8],
 
 __device__ __forceinline__
 void elem_apply_fast(const real_t xe[8], real_t ye[8],
-                    real_t k_e, real_t rhoc_e, real_t dt) {
+                     real_t k_e, real_t rhoc_e, real_t dt) {
     for (int i = 0; i < 8; ++i) {
         real_t acc = 0.0;
         for (int j = 0; j < 8; ++j)
@@ -352,7 +354,7 @@ void elem_apply_fast(const real_t xe[8], real_t ye[8],
 template<int FAST>
 __global__
 void operator_kernel(const real_t* __restrict__ x, real_t* __restrict__ y,
-                    Grid g, real_t dt_eff, FIConfig fi, int color) {
+                     Grid g, real_t dt_eff, FIConfig fi, int color) {
     long tid = (long)blockIdx.x * blockDim.x + threadIdx.x;
     long e; int ix_e, iy_e, iz_e;
     if (!resolve_element(tid, color, g, e, ix_e, iy_e, iz_e)) return;
@@ -458,7 +460,7 @@ __global__ void jacobi_apply_kernel(const real_t* r, const real_t* d,
 // Two-stage deterministic dot product over owned nodes.
 __global__
 void owned_dot_partial_kernel(const real_t* x, const real_t* y,
-                            real_t* partial, Grid g) {
+                              real_t* partial, Grid g) {
     extern __shared__ real_t sdata[];
     int tid = threadIdx.x;
     long i = (long)blockIdx.x * blockDim.x + tid;
@@ -761,9 +763,9 @@ public:
                   errKdiag < 1e-12 && errSym < 1e-12 * Kdiag);
         if (g.rank == 0)
             printf("Reference matrices: M pattern %.1e, sum(M)-V %.1e, K rowsum %.1e, "
-                "K diag %.1e, symmetry %.1e  -> %s\n",
-                (double)errM, (double)errSum, (double)errKrow, (double)errKdiag,
-                (double)errSym, ok ? "OK" : "FAIL");
+                   "K diag %.1e, symmetry %.1e  -> %s\n",
+                   (double)errM, (double)errSum, (double)errKrow, (double)errKdiag,
+                   (double)errSym, ok ? "OK" : "FAIL");
         if (!ok) MPI_Abort(MPI_COMM_WORLD, 2);
         CUDA_CHECK(cudaMemcpyToSymbol(c_Mhat, Mh, 64 * sizeof(real_t)));
         CUDA_CHECK(cudaMemcpyToSymbol(c_Khat, Kh, 64 * sizeof(real_t)));
@@ -817,8 +819,8 @@ public:
 
     // ---- setup --------------------------------------------------------------
     void setup(int nx, int ny, int nz, real_t Lx, real_t Ly, real_t Lz,
-            real_t dt_in, MPI_Comm comm, const char* field_prefix,
-            int verify, int kfast, int use_colored, int use_detect = 0) {
+               real_t dt_in, MPI_Comm comm, const char* field_prefix,
+               int verify, int kfast, int use_colored, int use_detect = 0) {
         MPI_Comm_rank(comm, &g.rank);
         MPI_Comm_size(comm, &g.nprocs);
         g.nx = nx; g.ny = ny; g.nz = nz;
@@ -891,14 +893,14 @@ public:
     // ---- halo ---------------------------------------------------------------
     void halo_exchange_sum(real_t* d_v) {
         if (g.nprocs == 1) return;
-        PUSH_RANGE("halo exchange", CAT_HALO);
+        PUSH_RANGE("halo_exchange", CAT_HALO);
         long face = (long)g.nny * g.nnz;
         int t = 256;
         long b = (face + t - 1) / t;
+        PUSH_RANGE("halo:pack_D2H", CAT_HALO);
         if (g.rank > 0)             pack_face_kernel<<<b, t>>>(d_v, d_send_l, g, 0);
         if (g.rank < g.nprocs - 1)  pack_face_kernel<<<b, t>>>(d_v, d_send_r, g, g.nx_local);
         CUDA_CHECK_LAUNCH_ASYNC();   // the cudaMemcpy(D2H) two lines below already blocks
-        PUSH_RANGE("halo:pack_D2H", CAT_HALO);
         if (g.rank > 0)
             CUDA_CHECK(cudaMemcpy(h_send_l, d_send_l, face * sizeof(real_t), cudaMemcpyDeviceToHost));
         if (g.rank < g.nprocs - 1)
@@ -1036,7 +1038,10 @@ public:
     }
 
     real_t dot(const real_t* d_x, const real_t* d_y) {
-        return dotA.dot(d_x, d_y, g, blocks_node, threads_node);
+        PUSH_RANGE("dot", CAT_DOT);
+        real_t result = dotA.dot(d_x, d_y, g, blocks_node, threads_node);
+        POP_RANGE();
+        return result;
         // Previous two-stage version (2 kernels + blocking cudaMemcpy):
         // owned_dot_partial_kernel<<<blocks_node, threads_node, threads_node*sizeof(real_t)>>>(
         //     d_x, d_y, d_partial, g);
@@ -1047,28 +1052,20 @@ public:
         // CUDA_CHECK(cudaMemcpy(&local, d_dot_result, sizeof(real_t), cudaMemcpyDeviceToHost));
         // MPI_Allreduce(&local, &global, 1, MPI_REAL_T, MPI_SUM, SOLVER_COMM);
         // return global;
-        PUSH_RANGE("dot", CAT_DOT);
-        owned_dot_partial_kernel<<<blocks_node, threads_node, threads_node*sizeof(real_t)>>>(
-            d_x, d_y, d_partial, g);
-        CUDA_CHECK_LAUNCH_ASYNC();
-        reduce_partials_kernel<<<1, 1024, 1024*sizeof(real_t)>>>(d_partial, blocks_node, d_dot_result);
-        CUDA_CHECK_LAUNCH_ASYNC();
-        real_t local, global;
-        PUSH_RANGE("dot:D2H_readback", CAT_DOT);
-        CUDA_CHECK(cudaMemcpy(&local, d_dot_result, sizeof(real_t), cudaMemcpyDeviceToHost));
-        POP_RANGE();
-        MPI_Allreduce(&local, &global, 1, MPI_REAL_T, MPI_SUM, SOLVER_COMM);
-        POP_RANGE();
-        return global;
     }
-    real_t norm2(const real_t* d_x) { return sqrt(dot(d_x, d_x)); }
+    real_t norm2(const real_t* d_x) {
+        PUSH_RANGE("norm2", CAT_NORM);
+        real_t result = sqrt(dot(d_x, d_x));
+        POP_RANGE();
+        return result;
+    }
 };
 
 // =============================================================================
 // Matrix-free PCG
 // =============================================================================
 int pcg_solve(HeatOperator& op, const real_t* d_b, real_t* d_x, int max_iter, real_t tol,
-            real_t* d_r, real_t* d_z, real_t* d_p, real_t* d_Ap, FILE* diag_log = nullptr) {
+              real_t* d_r, real_t* d_z, real_t* d_p, real_t* d_Ap, FILE* diag_log = nullptr) {
     PUSH_RANGE("pcg_solve", CAT_CG);
     long n = op.g.nnodes_local; int tn = op.threads_node; long bn = op.blocks_node;
     (void)tn; (void)bn;
@@ -1106,7 +1103,7 @@ int pcg_solve(HeatOperator& op, const real_t* d_b, real_t* d_x, int max_iter, re
         // beta is 0 (harmless placeholder) on the final, converged iteration --
         // that row is dropped in post-processing since it never feeds a p-update.
         if (diag_log) fprintf(diag_log, "%d,%.10e,%.10e,%.10e\n", iter + 1, (double)(rnorm / bnorm),
-                            (double)alpha, (double)beta);
+                              (double)alpha, (double)beta);
         POP_RANGE();
         if (conv) { iter++; break; }
     }
@@ -1128,7 +1125,7 @@ static void host_snapshot(HeatOperator& op, const real_t* d_T, std::vector<real_
 // the fraction of owned nodes with |a-b| > 1e-3 * max|a-b| (spatial spread of
 // the perturbation: ~0 for a fresh point fault, growing as diffusion smears it).
 static real_t global_rel_err(HeatOperator& op, const std::vector<real_t>& a, const std::vector<real_t>& b,
-                            real_t* spread = nullptr) {
+                             real_t* spread = nullptr) {
     const Grid& g = op.g;
     double num = 0.0, den = 0.0, dmax = 0.0; long nown = 0;
     for (long n = 0; n < g.nnodes_local; ++n) {
@@ -1181,12 +1178,12 @@ struct HybridCtx {          // everything the hybrid exchange needs, or enabled 
 };
 
 static void run_case(HeatOperator& op, int n_steps, int snap_every, FIConfig fi_cfg,
-                    int reproject_bc,
-                    real_t* d_T, real_t* d_b, real_t* d_r, real_t* d_z, real_t* d_p, real_t* d_Ap,
-                    std::vector<std::vector<real_t>>* keep_snaps,
-                    const std::vector<std::vector<real_t>>* ref,
-                    RunResult& res, HybridCtx* hy = nullptr, const char* case_tag = "",
-                    const RunResult* d3_ref = nullptr) {
+                     int reproject_bc,
+                     real_t* d_T, real_t* d_b, real_t* d_r, real_t* d_z, real_t* d_p, real_t* d_Ap,
+                     std::vector<std::vector<real_t>>* keep_snaps,
+                     const std::vector<std::vector<real_t>>* ref,
+                     RunResult& res, HybridCtx* hy = nullptr, const char* case_tag = "",
+                     const RunResult* d3_ref = nullptr) {
     long n = op.g.nnodes_local;
     CUDA_CHECK(cudaMemset(d_T, 0, n * sizeof(real_t)));
     if (op.g.ic_mode == 1) { gaussian_ic_kernel<<<op.blocks_node, op.threads_node>>>(d_T, op.g); CUDA_CHECK_LAUNCH(); }
@@ -1245,7 +1242,7 @@ static void run_case(HeatOperator& op, int n_steps, int snap_every, FIConfig fi_
             double sum = 0, nrm = 0;
             for (long t = 0; t < nin; ++t) { sum += hy->h_recv[t]; nrm += hy->h_recv[t]*hy->h_recv[t]; }
             real_t d4 = fmax(fabs(sum - hy->h_recv[nin]) / (fabs(hy->h_recv[nin]) + 1e-300),
-                            fabs(sqrt(nrm) - hy->h_recv[nin+1]) / (fabs(hy->h_recv[nin+1]) + 1e-300));
+                             fabs(sqrt(nrm) - hy->h_recv[nin+1]) / (fabs(hy->h_recv[nin+1]) + 1e-300));
             // classical block result (for the in-situ substrate comparison and D4-physics)
             long tb = 256, bb = (side*side*side + tb - 1) / tb;
             pack_block_kernel<<<bb, tb>>>(d_T, hy->d_buf, op.g, lx0, hy->qb.y0, hy->qb.z0, side);
@@ -1367,7 +1364,7 @@ static int target_on_boundary(HeatOperator& op, const FIConfig& fi) {
 
 // Layer-0 check. Requires a homogeneous field.
 static void run_verify(HeatOperator& op, int n_steps, real_t dt, const std::string& outdir,
-                    real_t* d_T, real_t* d_b, real_t* d_r, real_t* d_z, real_t* d_p, real_t* d_Ap) {
+                       real_t* d_T, real_t* d_b, real_t* d_r, real_t* d_z, real_t* d_p, real_t* d_Ap) {
     if (op.kmin != op.kmax || op.rhocmin != op.rhocmax) {
         if (op.g.rank == 0)
             fprintf(stderr, "--verify needs a homogeneous field (k %g..%g, rhoc %g..%g)\n",
@@ -1396,9 +1393,9 @@ static void run_verify(HeatOperator& op, int n_steps, real_t dt, const std::stri
     real_t rel_err = op.norm2(d_r) / exact_norm;
     if (op.g.rank == 0) {
         printf("VERIFY: N=%d dt=%.4e t_end=%.6e alpha=%g rel_L2_err=%.6e  (%s/%s, %.1f ms, %.1f CG it/step)\n",
-            op.g.nx, (double)dt, (double)t_end, (double)alpha, (double)rel_err,
-            op.kernel_fast ? "fast" : "gauss", op.colored ? "colored" : "atomic",
-            ms, (double)total_it / n_steps);
+               op.g.nx, (double)dt, (double)t_end, (double)alpha, (double)rel_err,
+               op.kernel_fast ? "fast" : "gauss", op.colored ? "colored" : "atomic",
+               ms, (double)total_it / n_steps);
         std::string p = outdir + "/verify.csv";
         FILE* vf = fopen(p.c_str(), "r"); int fresh = (vf == nullptr); if (vf) fclose(vf);
         vf = fopen(p.c_str(), "a");
@@ -1510,10 +1507,10 @@ int main(int argc, char** argv) {
     if (rank == 0) {
         printf("=== Assembly-Free FEM Heat Solver v2 (Backward Euler + Jacobi-PCG) ===\n");
         printf("Grid %d^3 (DOFs %ld)  ranks %d (1D x-decomp, %d cells/rank)\n",
-            N, (long)(N+1)*(N+1)*(N+1), nprocs, N/nprocs);
+               N, (long)(N+1)*(N+1)*(N+1), nprocs, N/nprocs);
         printf("dt %.4e  t_final %.4e  steps %d  kernel %s  scatter %s  mode %s\n",
-            (double)dt, (double)t_final, n_steps, kernel_fast ? "fast" : "gauss",
-            colored ? "colored" : "atomic", verify_mode ? "VERIFY" : "production");
+               (double)dt, (double)t_final, n_steps, kernel_fast ? "fast" : "gauss",
+               colored ? "colored" : "atomic", verify_mode ? "VERIFY" : "production");
     }
 
     HeatOperator op;
@@ -1550,11 +1547,11 @@ int main(int argc, char** argv) {
             MPI_Send(cfg, 6, MPI_DOUBLE, QRANK, 999, MPI_COMM_WORLD);
         }
         if (rank == 0) printf("Hybrid: quantum block %d^3 at (%d,%d,%d), owner rank %d, quantum world rank %d\n",
-                            bs, qb.x0, qb.y0, qb.z0, hy.qb.owner, QRANK);
+                              bs, qb.x0, qb.y0, qb.z0, hy.qb.owner, QRANK);
     }
     if (rank == 0)
         printf("Material: k in [%g, %g] (contrast %.3g), rho*c in [%g, %g]\n",
-            (double)op.kmin, (double)op.kmax, (double)(op.kmax/op.kmin), (double)op.rhocmin, (double)op.rhocmax);
+               (double)op.kmin, (double)op.kmax, (double)(op.kmax/op.kmin), (double)op.rhocmin, (double)op.rhocmax);
 
     long n = op.g.nnodes_local;
     real_t *d_T, *d_b, *d_r, *d_z, *d_p, *d_Ap;
@@ -1577,7 +1574,7 @@ int main(int argc, char** argv) {
         fclose(lf);
         if (rank == 0)
             printf("diag-cg: %d iterations to 1e-8, contrast k_max/k_min=%.3g -> %s\n",
-                it, (double)(op.kmax / op.kmin), diag_cg_path.c_str());
+                   it, (double)(op.kmax / op.kmin), diag_cg_path.c_str());
     } else {
         // ---- twin-run protocol ---------------------------------------------
         std::vector<std::vector<real_t>> snapA;
@@ -1677,17 +1674,17 @@ int main(int argc, char** argv) {
                     printf("hybrid       block err max clean %.3e  fault %.3e   D4 first %d\n", (double)hA, (double)hF, rX.d4_first);
                 if (detect)
                     printf("detectors    D1 first %d (max %.2e)  D2 first %d (max %.2e)  D3 first %d  -> %s   [clean A: D1 %.2e D2 %.2e]\n",
-                        rX.d1_first, (double)rX.d1_max, rX.d2_first, (double)rX.d2_max, rX.d3_first, by.c_str(),
-                        (double)rA.d1_max, (double)rA.d2_max);
+                           rX.d1_first, (double)rX.d1_max, rX.d2_first, (double)rX.d2_max, rX.d3_first, by.c_str(),
+                           (double)rA.d1_max, (double)rA.d2_max);
             }
             fclose(sf);
             printf("\n=== Done (%s) ===\n", tag.c_str());
             printf("solve wall A/B/F (ms): %.1f / %.1f / %.1f   mean CG iters A: %.2f\n",
-                rA.solve_ms, rB.solve_ms, rF.solve_ms, meanA);
+                   rA.solve_ms, rB.solve_ms, rF.solve_ms, meanA);
             printf("noise floor  max %.3e  final %.3e\n", (double)Efl_max, (double)Efl_final);
             if (fi_cfg.level > 0)
                 printf("fault        max %.3e @step %d  int %.3e  final %.3e  iters+%d  bnd %d  -> %s\n",
-                    (double)Efa_max, step_max, (double)Efa_int, (double)Efa_final, iters_delta_max, on_bnd, cls);
+                       (double)Efa_max, step_max, (double)Efa_int, (double)Efa_final, iters_delta_max, on_bnd, cls);
             char mp[600]; snprintf(mp, sizeof(mp), "%s/meta_%s.txt", outdir.c_str(), tag.c_str());
             FILE* mf = fopen(mp, "w");
             fprintf(mf, "N %d\nnprocs %d\ndt %g\nn_steps %d\nfield %s\nkernel %s\nscatter %s\n",
