@@ -1,22 +1,28 @@
 {
   "configurations": [
     {
-      "fi": "LEVEL STEP TARGET BIT",
-      "fi_rank": "R",
-      "snap": "S",
-      "tag": "NAME",
-      "kernel": "gauss|fast",
-      "scatter": "atomic|colored",
-      "thr": "X",
-      "reproject-bc": true,
-      "detect": false,
-      "verify": true,
-      "no_source": true,
-      "ic": "zero|gaussian",
-      "dump_snaps": true,
-      "diag_cg": "FILE",
-      "qrank": true,
-      "qblock": "X0 Y0 Z0 m"
+      "tag": "e",
+      "np": 1,
+      "N": 32,
+      "t_final": 0.02,
+      "dt": 0.0005,
+      "field": "results/ensemble_N32/fields/ln32_s0.5_seed1",
+      "outdir": "results/profrun4",
+      "snap": 5,
+      "kernel": "fast",
+      "scatter": "colored",
+      "detect": true,
+
+      "fi": null,
+      "fi_rank": null,
+      "thr": null,
+      "reproject-bc": false,
+      "verify": false,
+      "no_source": false,
+      "ic": null,
+      "dump_snaps": false,
+      "diag_cg": null,
+      "qblock": null
     }
   ]
 }

@@ -5,94 +5,73 @@
 
 CONFIG_FILE="config.json"
 
-jq -c '.configurations[]' "$CONFIG_FILE" | while read -r config; do
+get() { jq -r --arg k "$1" '.[$k] // empty' <<< "$config"; }
 
-    FI=$(echo "$config" | jq -r '.fi')
-    FI_RANK=$(echo "$config" | jq -r '.fi_rank')
-    SNAP=$(echo "$config" | jq -r '.snap')
-    TAG=$(echo "$config" | jq -r '.tag')
-    KERNEL=$(echo "$config" | jq -r '.kernel')
-    SCATTER=$(echo "$config" | jq -r '.scatter')
-    THR=$(echo "$config" | jq -r '.thr')
-    REPROJECT_BC=$(echo "$config" | jq -r '."reproject-bc"')
-    DETECT=$(echo "$config" | jq -r '.detect')
-    VERIFY=$(echo "$config" | jq -r '.verify')
-    NO_SOURCE=$(echo "$config" | jq -r '.no_source')
-    IC=$(echo "$config" | jq -r '.ic')
-    DUMP_SNAPS=$(echo "$config" | jq -r '.dump_snaps')
-    DIAG_CG=$(echo "$config" | jq -r '.diag_cg')
-    QRANK=$(echo "$config" | jq -r '.qrank')
-    QBLOCK=$(echo "$config" | jq -r '.qblock')
+
+while read -r config <&3; do
+
+    TAG=$(get tag);       NP=$(get np); NP=${NP:-1}
+    N=$(get N);           T_FINAL=$(get t_final);  DT=$(get dt)
+    FIELD=$(get field);   OUTDIR=$(get outdir)
+
+    if [[ -z "$N" || -z "$T_FINAL" || -z "$DT" || -z "$FIELD" || -z "$OUTDIR" ]]; then
+        echo "[$TAG] N, t_final, dt, field and outdir are required -- skipping" >&2
+        continue
+    fi
+    if [[ ! -f "${FIELD}_k.bin" || ! -f "${FIELD}_rhoc.bin" ]]; then
+        echo "[$TAG] missing ${FIELD}_{k,rhoc}.bin (run scripts/gen_field.py) -- skipping" >&2
+        continue
+    fi
+    mkdir -p "$OUTDIR"
 
     NSYS_ARGS=(
-        -t cuda,nvtx
+        -t cuda,nvtx,mpi
         --cuda-memory-usage=true
+        --stats=true
         -f true
-        -o first_prof
+        -o "$OUTDIR/prof_$TAG"
     )
 
+    APP_ARGS=("$N" "$T_FINAL" "$DT" "$FIELD" "$OUTDIR" --tag "$TAG")
 
-    APP_ARGS=()
+    FI=$(get fi)
+    if [[ -n "$FI" ]]; then
+        read -r FI_LEVEL FI_STEP FI_TARGET FI_BIT <<< "$FI"
+        APP_ARGS+=(--fi "$FI_LEVEL" "$FI_STEP" "$FI_TARGET" "$FI_BIT")
+        FI_RANK=$(get fi_rank); [[ -n "$FI_RANK" ]] && APP_ARGS+=(--fi-rank "$FI_RANK")
+    fi
 
-    read -r FI_LEVEL FI_STEP FI_TARGET FI_BIT <<< "$FI"
+    V=$(get snap);    [[ -n "$V" ]] && APP_ARGS+=(--snap "$V")
+    V=$(get kernel);  [[ -n "$V" ]] && APP_ARGS+=(--kernel "$V")
+    V=$(get scatter); [[ -n "$V" ]] && APP_ARGS+=(--scatter "$V")
+    V=$(get thr);     [[ -n "$V" ]] && APP_ARGS+=(--thr "$V")
+    V=$(get ic);      [[ -n "$V" ]] && APP_ARGS+=(--ic "$V")
+    V=$(get diag_cg); [[ -n "$V" ]] && APP_ARGS+=(--diag-cg "$V")
 
-    APP_ARGS+=(
-        --fi
-        "$FI_LEVEL"
-        "$FI_STEP"
-        "$FI_TARGET"
-        "$FI_BIT"
-    )
+    [[ "$(get reproject-bc)" == "true" ]] && APP_ARGS+=(--reproject-bc)
+    [[ "$(get detect)"       == "true" ]] && APP_ARGS+=(--detect)
+    [[ "$(get verify)"       == "true" ]] && APP_ARGS+=(--verify)
+    [[ "$(get no_source)"    == "true" ]] && APP_ARGS+=(--no-source)
+    [[ "$(get dump_snaps)"   == "true" ]] && APP_ARGS+=(--dump-snaps)
 
-    APP_ARGS+=(
-        --fi-rank "$FI_RANK"
-        --snap "$SNAP"
-        --tag "$TAG"
-        --kernel "$KERNEL"
-        --scatter "$SCATTER"
-        --thr "$THR"
-    )
-
-
-    [[ "$REPROJECT_BC" == "true" ]] && APP_ARGS+=(--reproject-bc)
-    [[ "$DETECT"      == "true" ]] && APP_ARGS+=(--detect)
-    [[ "$VERIFY"      == "true" ]] && APP_ARGS+=(--verify)
-    [[ "$NO_SOURCE"   == "true" ]] && APP_ARGS+=(--no-source)
-
-    APP_ARGS+=(
-        --ic "$IC"
-    )
-
-    [[ "$DUMP_SNAPS" == "true" ]] && APP_ARGS+=(--dump-snaps)
-
-    APP_ARGS+=(
-        --diag-cg "$DIAG_CG"
-    )
-
-    [[ "$QRANK" == "true" ]] && APP_ARGS+=(--qrank)
-
-    read -r QBLOCK_X QBLOCK_Y QBLOCK_Z QBLOCK_M <<< "$QBLOCK"
-
-    APP_ARGS+=(
-        --qblock
-        "$QBLOCK_X"
-        "$QBLOCK_Y"
-        "$QBLOCK_Z"
-        "$QBLOCK_M"
-    )
+    QBLOCK=$(get qblock)
+    if [[ -n "$QBLOCK" ]]; then
+        read -r QBLOCK_X QBLOCK_Y QBLOCK_Z QBLOCK_M <<< "$QBLOCK"
+        APP_ARGS+=(--qblock "$QBLOCK_X" "$QBLOCK_Y" "$QBLOCK_Z" "$QBLOCK_M")
+    fi
 
     echo "Executing configuration: $TAG"
 
     printf 'nsys profile '
     printf '%q ' "${NSYS_ARGS[@]}"
-    printf 'mpirun -np 1 ./build/heat_solver_het '
+    printf 'mpirun -np %s ./build/heat_solver_het ' "$NP"
     printf '%q ' "${APP_ARGS[@]}"
     printf '\n'
 
     nsys profile \
             "${NSYS_ARGS[@]}" \
-            mpirun -np 1 \
+            mpirun -np "$NP" \
             ./build/heat_solver_het \
             "${APP_ARGS[@]}"
 
-done
+done 3< <(jq -c '.configurations[]' "$CONFIG_FILE")

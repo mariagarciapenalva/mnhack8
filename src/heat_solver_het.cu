@@ -491,6 +491,67 @@ void reduce_partials_kernel(const real_t* partial, long n, real_t* result) {
     if (tid == 0) *result = sdata[0];
 }
 
+// Single-kernel dot product
+__global__
+void owned_dot_atomic_kernel(const real_t* x, const real_t* y,
+                             real_t* s, real_t* s_next, Grid g) {
+    extern __shared__ real_t sdata[];
+    int tid = threadIdx.x;
+    long i = (long)blockIdx.x * blockDim.x + tid;
+    real_t v = 0.0;
+    if (i < g.nnodes_local) {
+        int ix_local = (int)(i / (g.nny * g.nnz));
+        if (is_owned(ix_local, g)) v = x[i] * y[i];
+    }
+    sdata[tid] = v;
+    __syncthreads();
+    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+        if (tid < st) sdata[tid] += sdata[tid + st];
+        __syncthreads();
+    }
+    if (tid == 0) atomicAdd(s, sdata[0]);
+    if (blockIdx.x == 0 && tid == 0) *s_next = 0.0;   // arm the other buffer
+}
+
+struct DotAtomic {
+    real_t* d_s[2] = {nullptr, nullptr};   // device accumulators
+    real_t* h_s    = nullptr;              // pinned host landing slot
+    int     cur    = 0;
+
+    void init() {
+        CUDA_CHECK(cudaMalloc(&d_s[0], 2 * sizeof(real_t)));
+        d_s[1] = d_s[0] + 1;
+        CUDA_CHECK(cudaMemset(d_s[0], 0, 2 * sizeof(real_t)));
+        CUDA_CHECK(cudaMallocHost(&h_s, sizeof(real_t)));
+    }
+    void free() {
+        cudaFree(d_s[0]); cudaFreeHost(h_s);
+        d_s[0] = d_s[1] = nullptr; h_s = nullptr;
+    }
+
+    // Launch only; returns the device scalar holding the local (per-rank) sum.
+    real_t* dev(const real_t* d_x, const real_t* d_y, const Grid& g, long blocks, int threads) {
+        real_t* s = d_s[cur]; real_t* s_next = d_s[cur ^ 1];
+        owned_dot_atomic_kernel<<<blocks, threads, threads * sizeof(real_t)>>>(d_x, d_y, s, s_next, g);
+        CUDA_CHECK_LAUNCH_ASYNC();
+        cur ^= 1;
+        return s;
+    }
+
+    // Host readback (by value) + global sum over ranks.
+    real_t value(const real_t* s) {
+        CUDA_CHECK(cudaMemcpyAsync(h_s, s, sizeof(real_t), cudaMemcpyDeviceToHost, 0));
+        CUDA_CHECK(cudaStreamSynchronize(0));
+        real_t local = *h_s, global;
+        MPI_Allreduce(&local, &global, 1, MPI_REAL_T, MPI_SUM, SOLVER_COMM);
+        return global;
+    }
+
+    real_t dot(const real_t* d_x, const real_t* d_y, const Grid& g, long blocks, int threads) {
+        return value(dev(d_x, d_y, g, blocks, threads));
+    }
+};
+
 // ---- Layer 4 (training-free detection) helper kernels ----------------------
 // 1 on interior (non-Dirichlet) nodes, 0 on the boundary.
 __global__ void ones_interior_kernel(real_t* v, Grid g) {
@@ -649,6 +710,7 @@ public:
     real_t *h_send_l = nullptr, *h_send_r = nullptr;
     real_t *h_recv_l = nullptr, *h_recv_r = nullptr;
     real_t *d_partial = nullptr, *d_dot_result = nullptr;
+    DotAtomic dotA;
 
     int  threads_node = 256; long blocks_node = 0;
     int  threads_elem = 128; long blocks_elem = 0;
@@ -792,6 +854,7 @@ public:
             color_blocks[c] = (color_count(c, g) + threads_elem - 1) / threads_elem;
         CUDA_CHECK(cudaMalloc(&d_partial, blocks_node * sizeof(real_t)));
         CUDA_CHECK(cudaMalloc(&d_dot_result, sizeof(real_t)));
+        dotA.init();
 
         load_fields(field_prefix);
         build_reference_matrices();
@@ -820,6 +883,7 @@ public:
         cudaFree(d_kcell); cudaFree(d_rhoccell); cudaFree(d_diag); cudaFree(d_F);
         cudaFree(d_send_l); cudaFree(d_send_r); cudaFree(d_recv_l); cudaFree(d_recv_r);
         cudaFree(d_partial); cudaFree(d_dot_result);
+        dotA.free();
         cudaFree(d_ones_int); cudaFree(d_wM); cudaFree(d_wA); cudaFree(d_pmin); cudaFree(d_pmax); cudaFree(d_mm);
         free(h_send_l); free(h_send_r); free(h_recv_l); free(h_recv_r);
     }
@@ -972,6 +1036,17 @@ public:
     }
 
     real_t dot(const real_t* d_x, const real_t* d_y) {
+        return dotA.dot(d_x, d_y, g, blocks_node, threads_node);
+        // Previous two-stage version (2 kernels + blocking cudaMemcpy):
+        // owned_dot_partial_kernel<<<blocks_node, threads_node, threads_node*sizeof(real_t)>>>(
+        //     d_x, d_y, d_partial, g);
+        // CUDA_CHECK_LAUNCH_ASYNC();
+        // reduce_partials_kernel<<<1, 1024, 1024*sizeof(real_t)>>>(d_partial, blocks_node, d_dot_result);
+        // CUDA_CHECK_LAUNCH_ASYNC();
+        // real_t local, global;
+        // CUDA_CHECK(cudaMemcpy(&local, d_dot_result, sizeof(real_t), cudaMemcpyDeviceToHost));
+        // MPI_Allreduce(&local, &global, 1, MPI_REAL_T, MPI_SUM, SOLVER_COMM);
+        // return global;
         PUSH_RANGE("dot", CAT_DOT);
         owned_dot_partial_kernel<<<blocks_node, threads_node, threads_node*sizeof(real_t)>>>(
             d_x, d_y, d_partial, g);
